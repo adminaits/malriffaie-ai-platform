@@ -302,13 +302,19 @@ async def answer_chat(
 
         hf = _build_huggingface_client(cfg)
 
-        answer = await hf.generate(
-            prompt,
-            temperature=cfg.get("temperature", 0.3),
-            top_p=cfg.get("top_p", 0.9),
-            max_tokens=cfg.get("max_tokens", 512),
-            timeout=cfg.get("timeout", 30),
-        )
+      try:
+    answer = await hf.generate(
+        prompt,
+        temperature=cfg.get("temperature", 0.3),
+        top_p=cfg.get("top_p", 0.9),
+        max_tokens=cfg.get("max_tokens", 512),
+        timeout=cfg.get("timeout", 30),
+    )
+except Exception as exc:
+    answer = (
+        cfg.get("fallback_message")
+        or f"I could not connect to the AI service right now. Please try again or contact support. Error: {str(exc)}"
+    )
 
         if not answer or "AI is not configured" in answer:
             answer = (
