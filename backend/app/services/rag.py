@@ -38,13 +38,6 @@ def _format_price(value, currency="BHD") -> str:
 
 
 def _clean_optional_url(value):
-    """
-    Prevent invalid custom endpoint values from breaking the chat.
-
-    Empty values, null-like text, or non-URL strings should be ignored.
-    If ignored, HuggingFaceClient will build the normal Hugging Face API URL
-    from the selected model name.
-    """
     if value is None:
         return None
 
@@ -78,8 +71,6 @@ def _clean_model_name(value, fallback="HuggingFaceH4/zephyr-7b-beta"):
 
 
 def retrieve_context(query: str, limit: int = 8) -> dict:
-    # Simple Postgres text search fallback.
-    # For production, add pgvector embeddings and RPC match_documents().
     kb = (
         supabase
         .table("knowledge_base")
@@ -165,7 +156,6 @@ def _wants_product_list(message: str) -> bool:
 def _matched_product(message: str, products: list[dict]) -> dict | None:
     low = message.lower()
 
-    # Longest name first avoids short partial matches taking priority.
     for product in sorted(products, key=lambda p: len(p.get("name") or ""), reverse=True):
         name = (product.get("name") or "").lower()
         if name and name in low:
@@ -214,7 +204,6 @@ def _build_huggingface_client(cfg: dict) -> HuggingFaceClient:
     token = cfg.get("hugging_face_token") or settings.hugging_face_token
 
     selected_model = cfg.get("model_name") or cfg.get("model")
-
     custom_model = cfg.get("custom_model_name")
 
     if selected_model == "custom":
@@ -249,7 +238,6 @@ async def answer_chat(
     cfg = _latest_ai_settings()
     ctx = retrieve_context(message)
 
-    # Deterministic product answers keep the storefront clean and avoid malformed AI formatting.
     recommended = recommend_products(message, ctx["products"])
     answer = None
 
@@ -260,7 +248,18 @@ async def answer_chat(
         product = _matched_product(message, ctx["products"])
         if product and any(
             k in message.lower()
-            for k in ["tell", "detail", "price", "buy", "about", "more"]
+            for k in [
+                "tell",
+                "detail",
+                "price",
+                "buy",
+                "about",
+                "more",
+                "know",
+                "explain",
+                "what is",
+                "what about",
+            ]
         ):
             answer = _product_detail_answer(product)
             recommended = [product]
@@ -302,21 +301,25 @@ async def answer_chat(
 
         hf = _build_huggingface_client(cfg)
 
-      try:
-    answer = await hf.generate(
-        prompt,
-        temperature=cfg.get("temperature", 0.3),
-        top_p=cfg.get("top_p", 0.9),
-        max_tokens=cfg.get("max_tokens", 512),
-        timeout=cfg.get("timeout", 30),
-    )
-except Exception as exc:
-    answer = (
-        cfg.get("fallback_message")
-        or f"I could not connect to the AI service right now. Please try again or contact support. Error: {str(exc)}"
-    )
+        try:
+            answer = await hf.generate(
+                prompt,
+                temperature=cfg.get("temperature", 0.3),
+                top_p=cfg.get("top_p", 0.9),
+                max_tokens=cfg.get("max_tokens", 512),
+                timeout=cfg.get("timeout", 30),
+            )
+        except Exception as exc:
+            answer = (
+                cfg.get("fallback_message")
+                or f"I could not connect to the AI service right now. Please try again or contact support. Error: {str(exc)}"
+            )
 
-        if not answer or "AI is not configured" in answer:
+        if (
+            not answer
+            or "AI is not configured" in answer
+            or "AI connection exception" in answer
+        ):
             answer = (
                 cfg.get("fallback_message")
                 or "I do not have that information yet. I can arrange a human handoff for you."
