@@ -17,20 +17,24 @@ Today is {date}. User language: {lang}.
 
 
 def _latest_ai_settings() -> dict:
-    res = (
-        supabase
-        .table("ai_settings")
-        .select("*")
-        .order("created_at", desc=True)
-        .limit(1)
-        .execute()
-    )
-    return (res.data or [{}])[0]
+    try:
+        res = (
+            supabase
+            .table("ai_settings")
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        return (res.data or [{}])[0]
+    except Exception:
+        return {}
 
 
 def _format_price(value, currency="BHD") -> str:
     if value is None or value == "":
         return "Available"
+
     try:
         return f"{float(value):,.3f} {currency or 'BHD'}"
     except Exception:
@@ -38,6 +42,13 @@ def _format_price(value, currency="BHD") -> str:
 
 
 def _clean_optional_url(value):
+    """
+    Custom endpoint is optional.
+
+    If value is empty, null-like, or not a valid URL, ignore it.
+    This prevents errors like:
+    [Errno -5] No address associated with hostname
+    """
     if value is None:
         return None
 
@@ -71,40 +82,49 @@ def _clean_model_name(value, fallback="HuggingFaceH4/zephyr-7b-beta"):
 
 
 def retrieve_context(query: str, limit: int = 8) -> dict:
-    kb = (
-        supabase
-        .table("knowledge_base")
-        .select("id,source_type,source_id,content,metadata")
-        .ilike("content", f"%{query[:80]}%")
-        .limit(limit)
-        .execute()
-        .data
-        or []
-    )
+    try:
+        kb = (
+            supabase
+            .table("knowledge_base")
+            .select("id,source_type,source_id,content,metadata")
+            .ilike("content", f"%{query[:80]}%")
+            .limit(limit)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        kb = []
 
-    products = (
-        supabase
-        .table("products")
-        .select("*")
-        .eq("available", True)
-        .order("created_at", desc=True)
-        .limit(30)
-        .execute()
-        .data
-        or []
-    )
+    try:
+        products = (
+            supabase
+            .table("products")
+            .select("*")
+            .eq("available", True)
+            .order("created_at", desc=True)
+            .limit(30)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        products = []
 
-    services = (
-        supabase
-        .table("services")
-        .select("*")
-        .eq("available", True)
-        .order("created_at", desc=True)
-        .limit(30)
-        .execute()
-        .data
-        or []
-    )
+    try:
+        services = (
+            supabase
+            .table("services")
+            .select("*")
+            .eq("available", True)
+            .order("created_at", desc=True)
+            .limit(30)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        services = []
 
     return {
         "knowledge": kb,
@@ -117,29 +137,49 @@ def recommend_products(message: str, products: list[dict]) -> list[dict]:
     low = message.lower()
     scored = []
 
+    keyword_map = {
+        "new business": ["feasibility", "consultation", "marketing", "strategy"],
+        "startup": ["feasibility", "consultation", "marketing", "strategy"],
+        "start business": ["feasibility", "consultation", "marketing", "strategy"],
+        "business": ["feasibility", "consultation", "marketing"],
+        "feasibility": ["feasibility"],
+        "marketing": ["marketing", "strategy", "content"],
+        "agreement": ["agreement", "partnership"],
+        "partnership": ["partnership", "agreement"],
+        "hr": ["hr", "manual"],
+        "consultation": ["consultation", "online"],
+        "retainer": ["retainer", "membership"],
+        "subscription": ["subscription"],
+    }
+
+    expanded_terms = set()
+
+    for word in low.split():
+        if len(word) > 3:
+            expanded_terms.add(word)
+
+    for phrase, terms in keyword_map.items():
+        if phrase in low:
+            expanded_terms.update(terms)
+
     for p in products:
         text = f"{p.get('name', '')} {p.get('description', '')}".lower()
-        score = sum(1 for w in low.split() if len(w) > 3 and w in text)
+        score = sum(1 for term in expanded_terms if term in text)
 
-        if score or any(
-            k in low
-            for k in [
-                "marketing",
-                "agreement",
-                "hr",
-                "feasibility",
-                "consultation",
-                "retainer",
-            ]
-        ):
+        if score > 0:
             scored.append((score, p))
 
     scored.sort(key=lambda x: x[0], reverse=True)
-    return [p for _, p in scored[:3]] or products[:3]
+
+    if scored:
+        return [p for _, p in scored[:3]]
+
+    return products[:3]
 
 
 def _wants_product_list(message: str) -> bool:
     low = message.lower().strip()
+
     return any(
         phrase in low
         for phrase in [
@@ -149,6 +189,24 @@ def _wants_product_list(message: str) -> bool:
             "products list",
             "what products",
             "available products",
+            "show me products",
+            "what do you sell",
+        ]
+    )
+
+
+def _wants_service_list(message: str) -> bool:
+    low = message.lower().strip()
+
+    return any(
+        phrase in low
+        for phrase in [
+            "list all services",
+            "all services",
+            "show services",
+            "services list",
+            "what services",
+            "available services",
         ]
     )
 
@@ -160,6 +218,30 @@ def _matched_product(message: str, products: list[dict]) -> dict | None:
         name = (product.get("name") or "").lower()
         if name and name in low:
             return product
+
+    # Soft matching for common product intent
+    if "feasibility" in low:
+        for product in products:
+            if "feasibility" in (product.get("name") or "").lower():
+                return product
+
+    if "marketing" in low:
+        for product in products:
+            text = f"{product.get('name', '')} {product.get('description', '')}".lower()
+            if "marketing" in text:
+                return product
+
+    if "hr" in low or "manual" in low:
+        for product in products:
+            text = f"{product.get('name', '')} {product.get('description', '')}".lower()
+            if "hr" in text or "manual" in text:
+                return product
+
+    if "agreement" in low or "partnership" in low:
+        for product in products:
+            text = f"{product.get('name', '')} {product.get('description', '')}".lower()
+            if "agreement" in text or "partnership" in text:
+                return product
 
     return None
 
@@ -185,6 +267,24 @@ def _product_list_answer(products: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _service_list_answer(services: list[dict]) -> str:
+    if not services:
+        return "No services are currently available. Please book a consultation or contact support."
+
+    lines = ["Here are the services currently available:", ""]
+
+    for idx, service in enumerate(services, 1):
+        lines.append(
+            f"{idx}. {service.get('name')} — "
+            f"{_format_price(service.get('price'), service.get('currency'))}"
+        )
+
+    lines.append("")
+    lines.append("You can tell me what you need and I will recommend the best service.")
+
+    return "\n".join(lines)
+
+
 def _product_detail_answer(product: dict) -> str:
     return "\n".join(
         [
@@ -200,8 +300,69 @@ def _product_detail_answer(product: dict) -> str:
     )
 
 
+def _recommendation_answer(message: str, products: list[dict], services: list[dict]) -> tuple[str, list[dict]]:
+    recommended = recommend_products(message, products)
+
+    if not recommended:
+        return (
+            "For a new business, I recommend starting with an online consultation so we can understand your idea, budget, and next steps.",
+            [],
+        )
+
+    lines = [
+        "For a new business, I recommend starting with these options:",
+        "",
+    ]
+
+    for idx, product in enumerate(recommended, 1):
+        lines.append(
+            f"{idx}. {product.get('name')} — "
+            f"{_format_price(product.get('price'), product.get('currency'))}"
+        )
+        if product.get("description"):
+            lines.append(f"   {product.get('description')}")
+
+    lines.append("")
+    lines.append(
+        "If you are still at the idea stage, start with a Feasibility Study or Online Consultation. "
+        "If you already have partners or operations, a Partnership Agreement or HR Manual may be the next step."
+    )
+
+    return "\n".join(lines), recommended
+
+
+def _should_answer_deterministically(message: str) -> bool:
+    low = message.lower()
+
+    return any(
+        phrase in low
+        for phrase in [
+            "new business",
+            "start business",
+            "startup",
+            "which product",
+            "right product",
+            "recommend",
+            "feasibility",
+            "marketing",
+            "partnership",
+            "agreement",
+            "hr manual",
+            "consultation",
+            "price",
+            "cost",
+            "products",
+            "services",
+        ]
+    )
+
+
 def _build_huggingface_client(cfg: dict) -> HuggingFaceClient:
-    token = cfg.get("hugging_face_token") or settings.hugging_face_token
+    token = (
+        cfg.get("hugging_face_token")
+        or getattr(settings, "hugging_face_token", None)
+        or getattr(settings, "hf_token", None)
+    )
 
     selected_model = cfg.get("model_name") or cfg.get("model")
     custom_model = cfg.get("custom_model_name")
@@ -211,15 +372,22 @@ def _build_huggingface_client(cfg: dict) -> HuggingFaceClient:
     else:
         model_name = selected_model
 
+    default_model = (
+        getattr(settings, "default_hf_model", None)
+        or getattr(settings, "default_model", None)
+        or "HuggingFaceH4/zephyr-7b-beta"
+    )
+
     model_name = _clean_model_name(
-        model_name or settings.default_hf_model or settings.default_model,
+        model_name or default_model,
         fallback="HuggingFaceH4/zephyr-7b-beta",
     )
 
     endpoint_url = _clean_optional_url(
         cfg.get("custom_hf_endpoint")
         or cfg.get("custom_endpoint_url")
-        or settings.custom_hf_endpoint
+        or getattr(settings, "custom_hf_endpoint", None)
+        or getattr(settings, "custom_endpoint_url", None)
     )
 
     return HuggingFaceClient(
@@ -244,8 +412,14 @@ async def answer_chat(
     if _wants_product_list(message):
         answer = _product_list_answer(ctx["products"])
         recommended = ctx["products"][:6]
+
+    elif _wants_service_list(message):
+        answer = _service_list_answer(ctx["services"])
+        recommended = ctx["products"][:3]
+
     else:
         product = _matched_product(message, ctx["products"])
+
         if product and any(
             k in message.lower()
             for k in [
@@ -259,10 +433,18 @@ async def answer_chat(
                 "explain",
                 "what is",
                 "what about",
+                "cost",
             ]
         ):
             answer = _product_detail_answer(product)
             recommended = [product]
+
+        elif _should_answer_deterministically(message):
+            answer, recommended = _recommendation_answer(
+                message,
+                ctx["products"],
+                ctx["services"],
+            )
 
     if answer is None:
         prompt_template = cfg.get("system_prompt") or DEFAULT_PROMPT
@@ -319,6 +501,7 @@ async def answer_chat(
             not answer
             or "AI is not configured" in answer
             or "AI connection exception" in answer
+            or "No address associated with hostname" in answer
         ):
             answer = (
                 cfg.get("fallback_message")
@@ -326,15 +509,18 @@ async def answer_chat(
             )
 
     if visitor_id:
-        supabase.table("chat_messages").insert(
-            {
-                "visitor_id": visitor_id,
-                "message": message,
-                "response": answer,
-                "products_shown": recommended,
-                "ip_hash": ip_hash,
-            }
-        ).execute()
+        try:
+            supabase.table("chat_messages").insert(
+                {
+                    "visitor_id": visitor_id,
+                    "message": message,
+                    "response": answer,
+                    "products_shown": recommended,
+                    "ip_hash": ip_hash,
+                }
+            ).execute()
+        except Exception:
+            pass
 
     return {
         "answer": answer,
