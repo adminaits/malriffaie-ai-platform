@@ -7,11 +7,23 @@ settings = get_settings()
 
 DEFAULT_PROMPT = """
 You are the customer support and e-commerce AI concierge for {site}.
-Answer using ONLY the provided products, services, and knowledge base context.
-Do not mention files or source names to the customer.
-Format answers clearly with short paragraphs or bullet points.
+
+Use ONLY the approved context provided below:
+1. Products from the admin dashboard
+2. Services from the admin dashboard
+3. Knowledge base content synced from Google Drive or other approved sources
+
+Do not invent information.
+Do not mention internal table names, file names, or source names to the customer.
+If the answer is available in the approved context, answer clearly.
+If the answer is not available, say:
+"The information is not available yet. Please book a consultation or contact support."
+
+For company profile questions such as "About Malriffaie", "Who is Mohamed Alriffaie?", or "What is Enchantment Management?", prioritize the knowledge base context.
+
 Always show BHD prices with 3 decimals, for example 300.000 BHD.
-If the answer is not found, say clearly that the information is not available yet and ask the user to book a consultation or contact support.
+Format answers clearly with short paragraphs or bullet points.
+
 Today is {date}. User language: {lang}.
 """
 
@@ -42,13 +54,6 @@ def _format_price(value, currency="BHD") -> str:
 
 
 def _clean_optional_url(value):
-    """
-    Custom endpoint is optional.
-
-    If value is empty, null-like, or not a valid URL, ignore it.
-    This prevents errors like:
-    [Errno -5] No address associated with hostname
-    """
     if value is None:
         return None
 
@@ -81,18 +86,92 @@ def _clean_model_name(value, fallback="HuggingFaceH4/zephyr-7b-beta"):
     return value
 
 
+def _keyword_score(text: str, query: str) -> int:
+    text = (text or "").lower()
+    query = (query or "").lower()
+
+    stop_words = {
+        "what", "about", "tell", "know", "please", "can", "you", "the",
+        "is", "are", "for", "with", "from", "that", "this", "have", "has",
+        "who", "how", "why", "when", "where", "and", "or", "to", "of",
+    }
+
+    words = [
+        word.strip(".,?!:;()[]{}\"'")
+        for word in query.split()
+        if len(word.strip(".,?!:;()[]{}\"'")) > 2
+    ]
+
+    words = [word for word in words if word not in stop_words]
+
+    score = 0
+
+    for word in words:
+        if word in text:
+            score += 1
+
+    return score
+
+
 def retrieve_context(query: str, limit: int = 8) -> dict:
+    query_text = (query or "").strip()
+
     try:
-        kb = (
+        all_kb = (
             supabase
             .table("knowledge_base")
             .select("id,source_type,source_id,content,metadata")
-            .ilike("content", f"%{query[:80]}%")
-            .limit(limit)
+            .limit(200)
             .execute()
             .data
             or []
         )
+
+        scored_kb = []
+
+        for item in all_kb:
+            content = item.get("content") or ""
+            metadata = item.get("metadata") or {}
+
+            score = _keyword_score(content, query_text)
+            score += _keyword_score(str(metadata), query_text)
+
+            low_query = query_text.lower()
+            low_content = content.lower()
+
+            if "malriffaie" in low_query and "malriffaie" in low_content:
+                score += 5
+
+            if "alriffaie" in low_query and "alriffaie" in low_content:
+                score += 5
+
+            if "mohamed" in low_query and "mohamed" in low_content:
+                score += 5
+
+            if "enchantment" in low_query and "enchantment" in low_content:
+                score += 5
+
+            if "management" in low_query and "management" in low_content:
+                score += 3
+
+            if "about" in low_query and (
+                "about malriffaie" in low_content
+                or "about enchantment" in low_content
+                or "about mohamed" in low_content
+            ):
+                score += 5
+
+            if score > 0:
+                scored_kb.append((score, item))
+
+        scored_kb.sort(key=lambda x: x[0], reverse=True)
+        kb = [item for _, item in scored_kb[:limit]]
+
+        # Important fallback:
+        # If no keyword match, still provide some approved knowledge base context.
+        if not kb:
+            kb = all_kb[:limit]
+
     except Exception:
         kb = []
 
@@ -219,7 +298,6 @@ def _matched_product(message: str, products: list[dict]) -> dict | None:
         if name and name in low:
             return product
 
-    # Soft matching for common product intent
     if "feasibility" in low:
         for product in products:
             if "feasibility" in (product.get("name") or "").lower():
@@ -503,10 +581,15 @@ async def answer_chat(
             or "AI connection exception" in answer
             or "No address associated with hostname" in answer
         ):
-            answer = (
-                cfg.get("fallback_message")
-                or "I do not have that information yet. I can arrange a human handoff for you."
-            )
+            if ctx["knowledge"]:
+                first_context = ctx["knowledge"][0].get("content", "").strip()
+                answer = first_context[:900] if first_context else None
+
+            if not answer:
+                answer = (
+                    cfg.get("fallback_message")
+                    or "I do not have that information yet. I can arrange a human handoff for you."
+                )
 
     if visitor_id:
         try:
