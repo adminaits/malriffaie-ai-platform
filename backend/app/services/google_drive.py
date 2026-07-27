@@ -5,6 +5,7 @@ from app.db import supabase
 
 
 GOOGLE_DRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files"
+GOOGLE_FOLDER_MIME = "application/vnd.google-apps.folder"
 
 
 def extract_folder_id(folder_url_or_id: str | None) -> str:
@@ -19,33 +20,63 @@ def extract_folder_id(folder_url_or_id: str | None) -> str:
     return value
 
 
-async def list_drive_files(api_key: str, folder_id: str) -> list[dict]:
-    query = f"'{folder_id}' in parents and trashed = false"
+async def list_drive_files_recursive(api_key: str, parent_folder_id: str) -> list[dict]:
+    """
+    Reads all supported files inside:
+    - the parent folder
+    - all subfolders
+    - nested subfolders
 
+    It skips folders as files but scans inside them.
+    """
     all_files = []
-    page_token = None
+    folders_to_scan = [parent_folder_id]
+    scanned_folders = set()
 
     async with httpx.AsyncClient(timeout=60) as client:
-        while True:
-            params = {
-                "key": api_key,
-                "q": query,
-                "fields": "nextPageToken, files(id,name,mimeType,webViewLink,modifiedTime,size)",
-                "pageSize": 100,
-            }
+        while folders_to_scan:
+            current_folder_id = folders_to_scan.pop(0)
 
-            if page_token:
-                params["pageToken"] = page_token
+            if current_folder_id in scanned_folders:
+                continue
 
-            response = await client.get(GOOGLE_DRIVE_FILES_URL, params=params)
-            response.raise_for_status()
+            scanned_folders.add(current_folder_id)
 
-            data = response.json()
-            all_files.extend(data.get("files", []))
+            page_token = None
 
-            page_token = data.get("nextPageToken")
-            if not page_token:
-                break
+            while True:
+                query = f"'{current_folder_id}' in parents and trashed = false"
+
+                params = {
+                    "key": api_key,
+                    "q": query,
+                    "fields": "nextPageToken, files(id,name,mimeType,webViewLink,modifiedTime,size,parents)",
+                    "pageSize": 100,
+                }
+
+                if page_token:
+                    params["pageToken"] = page_token
+
+                response = await client.get(GOOGLE_DRIVE_FILES_URL, params=params)
+                response.raise_for_status()
+
+                data = response.json()
+                files = data.get("files", [])
+
+                for file in files:
+                    mime_type = file.get("mimeType")
+
+                    if mime_type == GOOGLE_FOLDER_MIME:
+                        folder_id = file.get("id")
+                        if folder_id and folder_id not in scanned_folders:
+                            folders_to_scan.append(folder_id)
+                    else:
+                        all_files.append(file)
+
+                page_token = data.get("nextPageToken")
+
+                if not page_token:
+                    break
 
     return all_files
 
@@ -147,7 +178,11 @@ async def delete_existing_knowledge_for_file(source_id: str) -> None:
     if not source_id:
         return
 
-    supabase.table("knowledge_base").delete().eq("source_type", "google_drive").eq("source_id", source_id).execute()
+    supabase.table("knowledge_base") \
+        .delete() \
+        .eq("source_type", "google_drive") \
+        .eq("source_id", source_id) \
+        .execute()
 
 
 async def insert_knowledge_chunks_from_drive_file(file: dict, content: str) -> int:
@@ -159,7 +194,6 @@ async def insert_knowledge_chunks_from_drive_file(file: dict, content: str) -> i
     await delete_existing_knowledge_for_file(source_id)
 
     chunks = chunk_text(content)
-
     inserted = 0
 
     for idx, chunk in enumerate(chunks):
@@ -172,6 +206,7 @@ async def insert_knowledge_chunks_from_drive_file(file: dict, content: str) -> i
                 "mimeType": file.get("mimeType"),
                 "webViewLink": file.get("webViewLink"),
                 "modifiedTime": file.get("modifiedTime"),
+                "parents": file.get("parents"),
                 "chunk_index": idx,
                 "total_chunks": len(chunks),
             },
@@ -190,7 +225,10 @@ async def sync_google_drive_widget(widget: dict) -> dict:
         or widget.get("drive_api_key")
     )
 
-    folder_id = widget.get("folder_id") or extract_folder_id(widget.get("folder_url"))
+    folder_id = (
+        widget.get("folder_id")
+        or extract_folder_id(widget.get("folder_url"))
+    )
 
     if not api_key:
         return {
@@ -206,7 +244,7 @@ async def sync_google_drive_widget(widget: dict) -> dict:
             "synced_files": 0,
         }
 
-    files = await list_drive_files(api_key, folder_id)
+    files = await list_drive_files_recursive(api_key, folder_id)
 
     synced_files = 0
     skipped_files = 0
@@ -232,10 +270,18 @@ async def sync_google_drive_widget(widget: dict) -> dict:
             total_chunks += chunks_inserted
         else:
             skipped_files += 1
+            skipped_details.append({
+                "name": file.get("name"),
+                "mimeType": file.get("mimeType"),
+                "reason": "No chunks inserted",
+            })
 
     return {
         "ok": True,
-        "message": f"Google Drive sync completed. {synced_files} files synced, {total_chunks} knowledge chunks created.",
+        "message": (
+            f"Google Drive sync completed. "
+            f"{synced_files} files synced, {total_chunks} knowledge chunks created."
+        ),
         "synced_files": synced_files,
         "skipped_files": skipped_files,
         "total_files_found": len(files),
