@@ -1,4 +1,5 @@
 import io
+import json
 import httpx
 from pypdf import PdfReader
 from app.db import supabase
@@ -7,12 +8,18 @@ from app.db import supabase
 GOOGLE_DRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files"
 GOOGLE_FOLDER_MIME = "application/vnd.google-apps.folder"
 
+DEFAULT_ALLOWED_MIME_TYPES = [
+    "application/pdf",
+    "application/vnd.google-apps.document",
+    "text/plain",
+]
+
 
 def extract_folder_id(folder_url_or_id: str | None) -> str:
     if not folder_url_or_id:
         return ""
 
-    value = folder_url_or_id.strip()
+    value = str(folder_url_or_id).strip()
 
     if "/folders/" in value:
         return value.split("/folders/")[1].split("?")[0].split("/")[0]
@@ -20,14 +27,90 @@ def extract_folder_id(folder_url_or_id: str | None) -> str:
     return value
 
 
+def _parse_allowed_mime_types(value) -> list[str]:
+    if not value:
+        return DEFAULT_ALLOWED_MIME_TYPES
+
+    if isinstance(value, list):
+        return value
+
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            pass
+
+        return [
+            item.strip()
+            for item in value.split(",")
+            if item.strip()
+        ]
+
+    return DEFAULT_ALLOWED_MIME_TYPES
+
+
+def _bool_value(value, default=True) -> bool:
+    if value is None:
+        return default
+
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "y", "on"}
+
+    return bool(value)
+
+
+async def list_drive_files_direct(api_key: str, folder_id: str) -> list[dict]:
+    """
+    Reads files directly inside one folder only.
+    Does not scan subfolders.
+    """
+    all_files = []
+    page_token = None
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        while True:
+            query = f"'{folder_id}' in parents and trashed = false"
+
+            params = {
+                "key": api_key,
+                "q": query,
+                "fields": "nextPageToken, files(id,name,mimeType,webViewLink,modifiedTime,size,parents)",
+                "pageSize": 100,
+            }
+
+            if page_token:
+                params["pageToken"] = page_token
+
+            response = await client.get(GOOGLE_DRIVE_FILES_URL, params=params)
+            response.raise_for_status()
+
+            data = response.json()
+
+            for file in data.get("files", []):
+                if file.get("mimeType") != GOOGLE_FOLDER_MIME:
+                    all_files.append(file)
+
+            page_token = data.get("nextPageToken")
+
+            if not page_token:
+                break
+
+    return all_files
+
+
 async def list_drive_files_recursive(api_key: str, parent_folder_id: str) -> list[dict]:
     """
-    Reads all supported files inside:
-    - the parent folder
-    - all subfolders
+    Reads all files inside:
+    - parent folder
+    - subfolders
     - nested subfolders
 
-    It skips folders as files but scans inside them.
+    Folders are scanned, not inserted as files.
     """
     all_files = []
     folders_to_scan = [parent_folder_id]
@@ -41,7 +124,6 @@ async def list_drive_files_recursive(api_key: str, parent_folder_id: str) -> lis
                 continue
 
             scanned_folders.add(current_folder_id)
-
             page_token = None
 
             while True:
@@ -79,6 +161,85 @@ async def list_drive_files_recursive(api_key: str, parent_folder_id: str) -> lis
                     break
 
     return all_files
+
+
+async def list_drive_folders_recursive(api_key: str, parent_folder_id: str) -> list[dict]:
+    """
+    Returns all folders under a parent folder.
+    This is for the admin dashboard folder selector.
+    """
+    folders = []
+    folders_to_scan = [
+        {
+            "id": parent_folder_id,
+            "name": "Parent Folder",
+            "path": "Parent Folder",
+        }
+    ]
+
+    scanned_folders = set()
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        while folders_to_scan:
+            current = folders_to_scan.pop(0)
+            current_folder_id = current["id"]
+            current_path = current["path"]
+
+            if current_folder_id in scanned_folders:
+                continue
+
+            scanned_folders.add(current_folder_id)
+            page_token = None
+
+            while True:
+                query = (
+                    f"'{current_folder_id}' in parents "
+                    f"and trashed = false "
+                    f"and mimeType = '{GOOGLE_FOLDER_MIME}'"
+                )
+
+                params = {
+                    "key": api_key,
+                    "q": query,
+                    "fields": "nextPageToken, files(id,name,mimeType,webViewLink,modifiedTime,parents)",
+                    "pageSize": 100,
+                }
+
+                if page_token:
+                    params["pageToken"] = page_token
+
+                response = await client.get(GOOGLE_DRIVE_FILES_URL, params=params)
+                response.raise_for_status()
+
+                data = response.json()
+                found_folders = data.get("files", [])
+
+                for folder in found_folders:
+                    folder_path = f"{current_path} / {folder.get('name')}"
+
+                    item = {
+                        "id": folder.get("id"),
+                        "name": folder.get("name"),
+                        "path": folder_path,
+                        "webViewLink": folder.get("webViewLink"),
+                        "modifiedTime": folder.get("modifiedTime"),
+                        "parents": folder.get("parents"),
+                    }
+
+                    folders.append(item)
+
+                    folders_to_scan.append({
+                        "id": folder.get("id"),
+                        "name": folder.get("name"),
+                        "path": folder_path,
+                    })
+
+                page_token = data.get("nextPageToken")
+
+                if not page_token:
+                    break
+
+    return folders
 
 
 def extract_pdf_text(pdf_bytes: bytes) -> str:
@@ -226,9 +387,14 @@ async def sync_google_drive_widget(widget: dict) -> dict:
     )
 
     folder_id = (
-        widget.get("folder_id")
+        widget.get("selected_folder_id")
+        or widget.get("folder_id")
+        or widget.get("parent_folder_id")
         or extract_folder_id(widget.get("folder_url"))
     )
+
+    include_subfolders = _bool_value(widget.get("include_subfolders"), default=True)
+    allowed_mime_types = _parse_allowed_mime_types(widget.get("allowed_mime_types"))
 
     if not api_key:
         return {
@@ -244,7 +410,10 @@ async def sync_google_drive_widget(widget: dict) -> dict:
             "synced_files": 0,
         }
 
-    files = await list_drive_files_recursive(api_key, folder_id)
+    if include_subfolders:
+        files = await list_drive_files_recursive(api_key, folder_id)
+    else:
+        files = await list_drive_files_direct(api_key, folder_id)
 
     synced_files = 0
     skipped_files = 0
@@ -252,13 +421,24 @@ async def sync_google_drive_widget(widget: dict) -> dict:
     skipped_details = []
 
     for file in files:
+        mime_type = file.get("mimeType")
+
+        if mime_type not in allowed_mime_types:
+            skipped_files += 1
+            skipped_details.append({
+                "name": file.get("name"),
+                "mimeType": mime_type,
+                "reason": "File type not allowed by widget settings",
+            })
+            continue
+
         content = await download_drive_file_text(api_key, file)
 
         if not content:
             skipped_files += 1
             skipped_details.append({
                 "name": file.get("name"),
-                "mimeType": file.get("mimeType"),
+                "mimeType": mime_type,
                 "reason": "No extractable text or unsupported file type",
             })
             continue
@@ -272,7 +452,7 @@ async def sync_google_drive_widget(widget: dict) -> dict:
             skipped_files += 1
             skipped_details.append({
                 "name": file.get("name"),
-                "mimeType": file.get("mimeType"),
+                "mimeType": mime_type,
                 "reason": "No chunks inserted",
             })
 
@@ -286,5 +466,7 @@ async def sync_google_drive_widget(widget: dict) -> dict:
         "skipped_files": skipped_files,
         "total_files_found": len(files),
         "total_chunks": total_chunks,
+        "include_subfolders": include_subfolders,
+        "allowed_mime_types": allowed_mime_types,
         "skipped_details": skipped_details,
     }
