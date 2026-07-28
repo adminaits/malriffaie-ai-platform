@@ -4,6 +4,37 @@ import { Send, ShoppingCart, Settings, Save, Trash2, Pencil, Plus, TestTube, Ref
 import { getProducts, getServices, getChatSettings, sendChat, adminList, adminCreate, adminUpdate, adminDelete, testHuggingFace, syncDriveWidget, exportLeadsCsv, loginAdmin, adminMe, changeAdminPassword, logoutAdmin, setAdminToken, registerClient, loginClient, clientMe, logoutClient, setClientToken } from './lib/api';
 import './styles.css';
 
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
+
+function getStoredAdminToken() {
+  return (
+    localStorage.getItem('admin_token') ||
+    localStorage.getItem('adminToken') ||
+    localStorage.getItem('token') ||
+    sessionStorage.getItem('admin_token') ||
+    sessionStorage.getItem('adminToken') ||
+    sessionStorage.getItem('token') ||
+    ''
+  );
+}
+
+async function listDriveFoldersForWidget(widgetId) {
+  const token = getStoredAdminToken();
+  const res = await fetch(`${API_BASE_URL}/api/integrations/drive/folders/${widgetId}`, {
+    method: 'GET',
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+  });
+
+  if (!res.ok) {
+    const msg = await res.text();
+    throw new Error(msg || 'Failed to load Google Drive folders.');
+  }
+
+  return await res.json();
+}
+
 function useVisitorId() {
   return useMemo(() => {
     let id = localStorage.getItem('visitor_id');
@@ -86,10 +117,42 @@ const defaults = {
   products: { name:'', description:'', price:'', currency:'BHD', image_url:'', available:true },
   services: { name:'', description:'', price:'', currency:'BHD', available:true },
   knowledge_base: { source_type:'manual', source_id:'', content:'', metadata:{} },
-  google_drive_widgets: { api_key:'', folder_id:'', folder_url:'', enabled:false, sync_interval_minutes:1440 },
+  google_drive_widgets: {
+    api_key: '',
+    folder_id: '',
+    folder_url: '',
+    parent_folder_id: '',
+    selected_folder_id: '',
+    include_subfolders: true,
+    allowed_mime_types: [
+      'application/pdf',
+      'application/vnd.google-apps.document',
+      'text/plain'
+    ],
+    access_mode: 'api_key_public',
+    enabled: false,
+    sync_interval_minutes: 1440
+  },
   booking_settings: { enabled:true, manual_fallback_enabled:true, google_calendar_enabled:false, api_key:'', calendar_id:'', timezone:'Asia/Bahrain', default_duration:60, buffer_minutes:15, work_start:'09:00', work_end:'17:00', working_days:['sun','mon','tue','wed','thu'], service_product_map:{} },
   bookings: { user_id:null, service_id:null, product_id:null, datetime:'', status:'pending', google_calendar_id:'' },
-  payment_settings: { mode:'manual', tap_enabled:false, manual_transfer_enabled:true, pending_message:'Your order is pending review. Please complete Benefit transfer and we will confirm shortly.' },
+  payment_settings: {
+    mode: 'manual',
+    tap_enabled: false,
+    manual_transfer_enabled: true,
+    tap_test_mode: true,
+    tap_test_public_key: '',
+    tap_test_secret_key: '',
+    tap_live_public_key: '',
+    tap_live_secret_key: '',
+    tap_payment_mode: 'charge',
+    tap_ui_mode: 'redirect',
+    tap_ui_language: 'en',
+    tap_success_url: '',
+    tap_failure_url: '',
+    tap_post_url: '',
+    tap_save_cards: false,
+    pending_message: 'Your order is pending review. Please complete Benefit transfer and we will confirm shortly.'
+  },
   payments: { booking_id:null, amount:'', currency:'BHD', method:'manual', status:'pending', transaction_id:'' },
   email_settings: { admin_email:'info6@malriffaie.com', confirmation_subject:'Booking confirmation', confirmation_body:'Thank you. Your booking has been received.', reminder_body:'Reminder: your booking is coming up soon.' },
   leads: { user_id:null, name:'', email:'', product_id:null, status:'new', paid:false },
@@ -101,21 +164,70 @@ const embeddingOptions = ['BAAI/bge-m3','sentence-transformers/paraphrase-multil
 
 function cleanPayload(table, form) {
   const payload = { ...form };
-  delete payload.id; delete payload.created_at; delete payload.updated_at; delete payload.synced_at;
+
+  delete payload.id;
+  delete payload.created_at;
+  delete payload.updated_at;
+  delete payload.synced_at;
+
   if ('price' in payload) payload.price = payload.price === '' ? null : Number(payload.price);
   if ('amount' in payload) payload.amount = payload.amount === '' ? null : Number(payload.amount);
+
   if (payload.user_id === '') payload.user_id = null;
   if (payload.service_id === '') payload.service_id = null;
   if (payload.product_id === '') payload.product_id = null;
   if (payload.booking_id === '') payload.booking_id = null;
+
   if (table === 'ai_settings') {
     if (payload.model_name === 'custom') payload.model_name = payload.custom_model_name;
     if (payload.embedding_model === 'custom') payload.embedding_model = payload.custom_embedding_model_name;
+
     delete payload.custom_model_name;
     delete payload.custom_embedding_model_name;
   }
+
+  if (table === 'google_drive_widgets') {
+    if (payload.allowed_mime_types && typeof payload.allowed_mime_types === 'string') {
+      try {
+        payload.allowed_mime_types = JSON.parse(payload.allowed_mime_types);
+      } catch {
+        payload.allowed_mime_types = payload.allowed_mime_types
+          .split(',')
+          .map(x => x.trim())
+          .filter(Boolean);
+      }
+    }
+
+    if (!payload.allowed_mime_types || !Array.isArray(payload.allowed_mime_types)) {
+      payload.allowed_mime_types = [
+        'application/pdf',
+        'application/vnd.google-apps.document',
+        'text/plain'
+      ];
+    }
+
+    payload.include_subfolders = !!payload.include_subfolders;
+    payload.enabled = !!payload.enabled;
+
+    if (
+      payload.sync_interval_minutes !== '' &&
+      payload.sync_interval_minutes !== null &&
+      payload.sync_interval_minutes !== undefined
+    ) {
+      payload.sync_interval_minutes = Number(payload.sync_interval_minutes);
+    }
+  }
+
+  if (table === 'payment_settings') {
+    payload.tap_test_mode = !!payload.tap_test_mode;
+    payload.tap_enabled = !!payload.tap_enabled;
+    payload.manual_transfer_enabled = !!payload.manual_transfer_enabled;
+    payload.tap_save_cards = !!payload.tap_save_cards;
+  }
+
   return payload;
 }
+
 
 function Field({ label, help, children }) { return <label className="formRow"><span>{label}</span><div>{children}{help && <small>{help}</small>}</div></label>; }
 function Text({ value='', onChange, type='text', placeholder='' }) { return <input type={type} value={value ?? ''} placeholder={placeholder} onChange={e=>onChange(e.target.value)} />; }
@@ -173,8 +285,307 @@ function ProductServiceForm({ table, form, setForm }) {
 
 function BookingForm({ form, setForm }) { const set=(k,v)=>setForm(f=>({ ...f, [k]:v })); return <div className="settingsForm"><Field label="Date/time"><Text type="datetime-local" value={form.datetime || ''} onChange={v=>set('datetime', v)} /></Field><Field label="Status"><Select value={form.status} onChange={v=>set('status', v)}><option>pending</option><option>confirmed</option><option>cancelled</option><option>completed</option></Select></Field><Field label="Service ID"><Text value={form.service_id || ''} onChange={v=>set('service_id', v)} /></Field><Field label="Product ID"><Text value={form.product_id || ''} onChange={v=>set('product_id', v)} /></Field><Field label="Google Calendar ID"><Text value={form.google_calendar_id || ''} onChange={v=>set('google_calendar_id', v)} /></Field></div>; }
 function BookingSettingsForm({ form, setForm }) { const set=(k,v)=>setForm(f=>({ ...f, [k]:v })); const days=form.working_days||[]; const t=(d,v)=>set('working_days', v?[...new Set([...days,d])]:days.filter(x=>x!==d)); return <div className="settingsForm"><Field label="Booking flow"><Check checked={form.enabled} onChange={v=>set('enabled', v)} /></Field><Field label="Manual booking fallback"><Check checked={form.manual_fallback_enabled} onChange={v=>set('manual_fallback_enabled', v)} /></Field><Field label="Google Calendar sync"><Check checked={form.google_calendar_enabled} onChange={v=>set('google_calendar_enabled', v)} /></Field><Field label="Google Calendar API key"><Text type="password" value={form.api_key || ''} onChange={v=>set('api_key', v)} /></Field><Field label="Calendar ID"><Text value={form.calendar_id || ''} onChange={v=>set('calendar_id', v)} /></Field><Field label="Timezone"><Text value={form.timezone || 'Asia/Bahrain'} onChange={v=>set('timezone', v)} /></Field><div className="grid2"><Field label="Default duration"><Text type="number" value={form.default_duration} onChange={v=>set('default_duration', Number(v))} /></Field><Field label="Buffer minutes"><Text type="number" value={form.buffer_minutes} onChange={v=>set('buffer_minutes', Number(v))} /></Field><Field label="Work start"><Text type="time" value={form.work_start} onChange={v=>set('work_start', v)} /></Field><Field label="Work end"><Text type="time" value={form.work_end} onChange={v=>set('work_end', v)} /></Field></div><Field label="Working days"><div className="checkStack inline">{['sun','mon','tue','wed','thu','fri','sat'].map(d=><Check key={d} label={d} checked={days.includes(d)} onChange={v=>t(d,v)} />)}</div></Field></div>; }
-function DriveForm({ form, setForm }) { const set=(k,v)=>setForm(f=>({ ...f, [k]:v })); return <div className="settingsForm"><Field label="Enabled"><Check checked={form.enabled} onChange={v=>set('enabled', v)} /></Field><Field label="Google Drive API key"><Text type="password" value={form.api_key || ''} onChange={v=>set('api_key', v)} /></Field><Field label="Folder ID"><Text value={form.folder_id || ''} onChange={v=>set('folder_id', v)} /></Field><Field label="Folder URL"><Text value={form.folder_url || ''} onChange={v=>set('folder_url', v)} /></Field><Field label="Sync interval minutes"><Text type="number" value={form.sync_interval_minutes} onChange={v=>set('sync_interval_minutes', Number(v))} /></Field></div>; }
-function PaymentSettingsForm({ form, setForm }) { const set=(k,v)=>setForm(f=>({ ...f, [k]:v })); return <div className="settingsForm"><Field label="Payment mode"><Select value={form.mode} onChange={v=>set('mode', v)}><option>manual</option><option>tap</option><option>both</option></Select></Field><Field label="Tap payment"><Check checked={form.tap_enabled} onChange={v=>set('tap_enabled', v)} /></Field><Field label="Manual Benefit Transfer"><Check checked={form.manual_transfer_enabled} onChange={v=>set('manual_transfer_enabled', v)} /></Field><Field label="Pending review message"><Textarea rows={4} value={form.pending_message} onChange={v=>set('pending_message', v)} /></Field></div>; }
+function DriveForm({ form, setForm }) {
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  const [folders, setFolders] = useState([]);
+  const [folderLoading, setFolderLoading] = useState(false);
+  const [folderError, setFolderError] = useState('');
+
+  const allowedMimeValue = Array.isArray(form.allowed_mime_types)
+    ? JSON.stringify(form.allowed_mime_types, null, 2)
+    : (
+      form.allowed_mime_types ||
+      JSON.stringify([
+        'application/pdf',
+        'application/vnd.google-apps.document',
+        'text/plain'
+      ], null, 2)
+    );
+
+  async function loadFolders() {
+    setFolderError('');
+    setFolderLoading(true);
+
+    try {
+      if (!form.id) {
+        setFolderError('Save or edit this Google Drive widget first, then load folders.');
+        return;
+      }
+
+      const res = await listDriveFoldersForWidget(form.id);
+      setFolders(res.folders || []);
+    } catch (e) {
+      setFolderError(e.message || 'Failed to load folders.');
+    } finally {
+      setFolderLoading(false);
+    }
+  }
+
+  return (
+    <div className="settingsForm">
+      <Field label="Enabled">
+        <Check checked={form.enabled} onChange={v => set('enabled', v)} />
+      </Field>
+
+      <Field
+        label="Google Drive API key"
+        help="With API key access, the Google Drive folder/files must be shared publicly or accessible by link."
+      >
+        <Text
+          type="password"
+          value={form.api_key || ''}
+          onChange={v => set('api_key', v)}
+        />
+      </Field>
+
+      <Field
+        label="Parent Folder URL"
+        help="Paste the main Google Drive folder URL here."
+      >
+        <Text
+          value={form.folder_url || ''}
+          onChange={v => set('folder_url', v)}
+          placeholder="https://drive.google.com/drive/folders/..."
+        />
+      </Field>
+
+      <Field
+        label="Folder ID"
+        help="Optional. Use this only if you prefer folder ID instead of folder URL."
+      >
+        <Text
+          value={form.folder_id || ''}
+          onChange={v => set('folder_id', v)}
+        />
+      </Field>
+
+      <Field
+        label="Parent Folder ID"
+        help="Optional. The system can extract this from the Parent Folder URL."
+      >
+        <Text
+          value={form.parent_folder_id || ''}
+          onChange={v => set('parent_folder_id', v)}
+        />
+      </Field>
+
+      <Field
+        label="Selected Folder ID"
+        help="Optional. If filled, sync will use this selected folder instead of the parent folder."
+      >
+        <Text
+          value={form.selected_folder_id || ''}
+          onChange={v => set('selected_folder_id', v)}
+        />
+      </Field>
+
+      <Field
+        label="Folder selector"
+        help="Save the widget first, then click Load folders to select a subfolder."
+      >
+        <div className="inlineActions">
+          <button
+            type="button"
+            className="secondary"
+            onClick={loadFolders}
+            disabled={folderLoading}
+          >
+            <RefreshCw size={16} /> {folderLoading ? 'Loading...' : 'Load folders'}
+          </button>
+        </div>
+
+        {folderError && <pre className="error">{folderError}</pre>}
+
+        {folders.length > 0 && (
+          <select
+            value={form.selected_folder_id || ''}
+            onChange={e => set('selected_folder_id', e.target.value)}
+          >
+            <option value="">Use parent folder</option>
+            {folders.map(folder => (
+              <option key={folder.id} value={folder.id}>
+                {folder.path || folder.name}
+              </option>
+            ))}
+          </select>
+        )}
+      </Field>
+
+      <Field
+        label="Include subfolders"
+        help="If enabled, sync will fetch files from the selected folder and all nested subfolders."
+      >
+        <Check
+          checked={form.include_subfolders ?? true}
+          onChange={v => set('include_subfolders', v)}
+        />
+      </Field>
+
+      <Field
+        label="Allowed file types"
+        help="JSON list of allowed MIME types."
+      >
+        <Textarea
+          rows={4}
+          value={allowedMimeValue}
+          onChange={v => set('allowed_mime_types', v)}
+        />
+      </Field>
+
+      <Field label="Access mode">
+        <Select
+          value={form.access_mode || 'api_key_public'}
+          onChange={v => set('access_mode', v)}
+        >
+          <option value="api_key_public">API key / public or link-accessible files</option>
+          <option value="service_account" disabled>Service account / private files later</option>
+          <option value="oauth" disabled>OAuth / private files later</option>
+        </Select>
+      </Field>
+
+      <Field label="Sync interval minutes">
+        <Text
+          type="number"
+          value={form.sync_interval_minutes ?? 1440}
+          onChange={v => set('sync_interval_minutes', Number(v))}
+        />
+      </Field>
+    </div>
+  );
+}
+function PaymentSettingsForm({ form, setForm }) {
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  return (
+    <div className="settingsForm">
+      <Field label="Payment mode">
+        <Select value={form.mode || 'manual'} onChange={v => set('mode', v)}>
+          <option value="manual">Manual Benefit Transfer</option>
+          <option value="tap">Tap</option>
+          <option value="both">Tap + Manual Transfer</option>
+        </Select>
+      </Field>
+
+      <Field label="Tap payment">
+        <Check checked={form.tap_enabled} onChange={v => set('tap_enabled', v)} />
+      </Field>
+
+      <Field label="Manual Benefit Transfer">
+        <Check
+          checked={form.manual_transfer_enabled}
+          onChange={v => set('manual_transfer_enabled', v)}
+        />
+      </Field>
+
+      <Field label="Enable Test Mode">
+        <Check
+          checked={form.tap_test_mode ?? true}
+          onChange={v => set('tap_test_mode', v)}
+        />
+      </Field>
+
+      <Field label="Test Secret Key">
+        <Text
+          type="password"
+          value={form.tap_test_secret_key || ''}
+          onChange={v => set('tap_test_secret_key', v)}
+        />
+      </Field>
+
+      <Field label="Test Public Key">
+        <Text
+          value={form.tap_test_public_key || ''}
+          onChange={v => set('tap_test_public_key', v)}
+        />
+      </Field>
+
+      <Field label="Live Public Key">
+        <Text
+          value={form.tap_live_public_key || ''}
+          onChange={v => set('tap_live_public_key', v)}
+        />
+      </Field>
+
+      <Field label="Live Secret Key">
+        <Text
+          type="password"
+          value={form.tap_live_secret_key || ''}
+          onChange={v => set('tap_live_secret_key', v)}
+        />
+      </Field>
+
+      <Field label="Tap Payment Mode">
+        <Select
+          value={form.tap_payment_mode || 'charge'}
+          onChange={v => set('tap_payment_mode', v)}
+        >
+          <option value="charge">Charge</option>
+          <option value="authorize">Authorize</option>
+        </Select>
+      </Field>
+
+      <Field label="Tap UI Mode">
+        <Select
+          value={form.tap_ui_mode || 'redirect'}
+          onChange={v => set('tap_ui_mode', v)}
+        >
+          <option value="redirect">Redirect</option>
+          <option value="popup">Popup</option>
+        </Select>
+      </Field>
+
+      <Field label="Tap UI Language">
+        <Select
+          value={form.tap_ui_language || 'en'}
+          onChange={v => set('tap_ui_language', v)}
+        >
+          <option value="en">English</option>
+          <option value="ar">Arabic</option>
+        </Select>
+      </Field>
+
+      <Field label="Return to success page">
+        <Text
+          value={form.tap_success_url || ''}
+          onChange={v => set('tap_success_url', v)}
+          placeholder="https://your-domain.com/payment-success"
+        />
+      </Field>
+
+      <Field label="Return to failure page">
+        <Text
+          value={form.tap_failure_url || ''}
+          onChange={v => set('tap_failure_url', v)}
+          placeholder="https://your-domain.com/payment-failed"
+        />
+      </Field>
+
+      <Field label="Post URL / Webhook URL">
+        <Text
+          value={form.tap_post_url || ''}
+          onChange={v => set('tap_post_url', v)}
+          placeholder="https://your-backend.com/api/tap/webhook"
+        />
+      </Field>
+
+      <Field label="Save Cards">
+        <Check
+          checked={form.tap_save_cards}
+          onChange={v => set('tap_save_cards', v)}
+        />
+      </Field>
+
+      <Field label="Pending review message">
+        <Textarea
+          rows={4}
+          value={form.pending_message}
+          onChange={v => set('pending_message', v)}
+        />
+      </Field>
+    </div>
+  );
+}
 function EmailSettingsForm({ form, setForm }) { const set=(k,v)=>setForm(f=>({ ...f, [k]:v })); return <div className="settingsForm"><Field label="Admin notification email"><Text type="email" value={form.admin_email || ''} onChange={v=>set('admin_email', v)} /></Field><Field label="Confirmation subject"><Text value={form.confirmation_subject || ''} onChange={v=>set('confirmation_subject', v)} /></Field><Field label="Confirmation email body"><Textarea rows={4} value={form.confirmation_body || ''} onChange={v=>set('confirmation_body', v)} /></Field><Field label="Reminder email body"><Textarea rows={4} value={form.reminder_body || ''} onChange={v=>set('reminder_body', v)} /></Field></div>; }
 function LeadForm({ form, setForm }) { const set=(k,v)=>setForm(f=>({ ...f, [k]:v })); return <div className="settingsForm"><Field label="Name"><Text value={form.name || ''} onChange={v=>set('name', v)} /></Field><Field label="Email"><Text type="email" value={form.email || ''} onChange={v=>set('email', v)} /></Field><Field label="Product ID"><Text value={form.product_id || ''} onChange={v=>set('product_id', v)} /></Field><Field label="Status"><Select value={form.status} onChange={v=>set('status', v)}><option>new</option><option>registered</option><option>contacted</option><option>paid</option><option>closed</option></Select></Field><Field label="Paid"><Check checked={form.paid} onChange={v=>set('paid', v)} /></Field></div>; }
 function KnowledgeForm({ form, setForm }) { const set=(k,v)=>setForm(f=>({ ...f, [k]:v })); return <div className="settingsForm"><Field label="Source type"><Select value={form.source_type} onChange={v=>set('source_type', v)}><option>manual</option><option>google_drive</option><option>product</option><option>service</option></Select></Field><Field label="Source ID"><Text value={form.source_id || ''} onChange={v=>set('source_id', v)} /></Field><Field label="Approved knowledge content"><Textarea rows={8} value={form.content || ''} onChange={v=>set('content', v)} /></Field></div>; }
