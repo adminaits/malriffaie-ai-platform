@@ -2,80 +2,151 @@ from fastapi import APIRouter, HTTPException, Depends
 from app.db import supabase
 from app.auth import get_current_admin
 from app.services.google_drive import sync_google_drive_widget
+import httpx
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
 
-@router.post("/knowledge/manual", dependencies=[Depends(get_current_admin)])
-def add_manual_knowledge(payload: dict):
-    content = payload.get("content", "").strip()
-
-    if not content:
-        raise HTTPException(status_code=400, detail="content is required")
-
-    result = (
-        supabase
-        .table("knowledge_base")
-        .insert({
-            "source_type": "manual",
-            "source_id": payload.get("source_id"),
-            "content": content,
-            "metadata": payload.get("metadata", {}),
-        })
-        .execute()
-    )
-
-    if not result.data:
-        raise HTTPException(status_code=500, detail="Failed to save manual knowledge")
-
-    return result.data[0]
-
-
-@router.post("/drive/sync/{widget_id}", dependencies=[Depends(get_current_admin)])
-async def sync_drive_widget(widget_id: str):
+def _latest_payment_settings() -> dict:
     rows = (
         supabase
-        .table("google_drive_widgets")
+        .table("payment_settings")
         .select("*")
-        .eq("id", widget_id)
+        .order("created_at", desc=True)
         .limit(1)
         .execute()
         .data
         or []
     )
+    return rows[0] if rows else {}
 
-    if not rows:
-        raise HTTPException(status_code=404, detail="Widget not found")
 
-    widget = rows[0]
+def _tap_secret_key(settings: dict) -> str | None:
+    test_mode = settings.get("tap_test_mode", True)
 
-    result = await sync_google_drive_widget(widget)
+    if test_mode:
+        return settings.get("tap_test_secret_key")
 
-    try:
-        supabase.table("google_drive_widgets").update({
-            "synced_at": "now()"
-        }).eq("id", widget_id).execute()
-    except Exception:
-        pass
+    return settings.get("tap_live_secret_key")
 
-    return result
+
+def _tap_public_key(settings: dict) -> str | None:
+    test_mode = settings.get("tap_test_mode", True)
+
+    if test_mode:
+        return settings.get("tap_test_public_key")
+
+    return settings.get("tap_live_public_key")
 
 
 @router.post("/tap/checkout")
 async def tap_checkout(payload: dict):
-    # Production note:
-    # Connect this to Tap Payments API using TAP_SECRET_KEY in Render environment variables.
-    return {
-        "ok": True,
-        "checkout_url": None,
-        "message": "Tap checkout stub. Connect Tap API credentials.",
+    settings = _latest_payment_settings()
+
+    if not settings.get("tap_enabled", False):
+        raise HTTPException(status_code=400, detail="Tap payment is disabled.")
+
+    secret_key = _tap_secret_key(settings)
+    public_key = _tap_public_key(settings)
+
+    if not secret_key:
+        raise HTTPException(status_code=400, detail="Tap secret key is missing.")
+
+    amount = payload.get("amount")
+    currency = payload.get("currency", "BHD")
+    customer = payload.get("customer", {})
+    description = payload.get("description", "Malriffaie payment")
+    order_id = payload.get("order_id")
+
+    if not amount:
+        raise HTTPException(status_code=400, detail="amount is required")
+
+    success_url = (
+        settings.get("tap_success_url")
+        or payload.get("success_url")
+        or "https://malriffaie-ai-platform-frontend-git-main-aitss-projects.vercel.app/payment-success"
+    )
+
+    failure_url = (
+        settings.get("tap_failure_url")
+        or payload.get("failure_url")
+        or "https://malriffaie-ai-platform-frontend-git-main-aitss-projects.vercel.app/payment-failed"
+    )
+
+    post_url = settings.get("tap_post_url") or payload.get("post_url")
+
+    tap_payload = {
+        "amount": float(amount),
+        "currency": currency,
+        "threeDSecure": True,
+        "save_card": bool(settings.get("tap_save_cards", False)),
+        "description": description,
+        "statement_descriptor": "Malriffaie",
+        "metadata": {
+            "order_id": order_id,
+        },
+        "reference": {
+            "transaction": str(order_id or ""),
+            "order": str(order_id or ""),
+        },
+        "receipt": {
+            "email": True,
+            "sms": False,
+        },
+        "customer": {
+            "first_name": customer.get("first_name", "Customer"),
+            "last_name": customer.get("last_name", ""),
+            "email": customer.get("email", "customer@example.com"),
+            "phone": {
+                "country_code": customer.get("country_code", "973"),
+                "number": customer.get("phone", "00000000"),
+            },
+        },
+        "source": {
+            "id": "src_all",
+        },
+        "redirect": {
+            "url": success_url,
+        },
     }
 
+    if post_url:
+        tap_payload["post"] = {
+            "url": post_url,
+        }
 
-@router.get("/calendar/availability")
-def calendar_availability():
-    # Production note:
-    # Connect this to Google Calendar freebusy endpoint using saved calendar settings.
+    headers = {
+        "Authorization": f"Bearer {secret_key}",
+        "Content-Type": "application/json",
+    }
+
+    async with httpx.AsyncClient(timeout=45) as client:
+        response = await client.post(
+            "https://api.tap.company/v2/charges",
+            headers=headers,
+            json=tap_payload,
+        )
+
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=response.text,
+        )
+
+    data = response.json()
+
+    payment_url = None
+
+    try:
+        payment_url = data.get("transaction", {}).get("url")
+    except Exception:
+        payment_url = None
+
     return {
-        "slots": [],
+        "ok": True,
+        "payment_id": data.get("id"),
+        "status": data.get("status"),
+        "checkout_url": payment_url,
+        "public_key": public_key,
+        "raw": data,
     }
