@@ -172,5 +172,13 @@ th { text-align: left; background: #f9fafb; color: #475467; font-weight: 700; }
   .clientDashboardShell { flex-direction: column; }
   .clientSide { width: auto; }
   .clientMain { padding: 16px; }
+  .spinIcon {
+  animation: spinIcon 1s linear infinite;
+}
+
+@keyframes spinIcon {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
   .widgetComposer { flex-direction: column; }
 }
