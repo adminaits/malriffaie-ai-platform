@@ -15,11 +15,26 @@ DEFAULT_ALLOWED_MIME_TYPES = [
 ]
 
 
-def extract_folder_id(folder_url_or_id: str | None) -> str:
-    if not folder_url_or_id:
-        return ""
+def _clean_value(value):
+    if value is None:
+        return None
 
-    value = str(folder_url_or_id).strip()
+    value = str(value).strip()
+
+    if value == "":
+        return None
+
+    if value.lower() in {"none", "null", "undefined", "n/a", "na", "-"}:
+        return None
+
+    return value
+
+
+def extract_folder_id(folder_url_or_id: str | None) -> str:
+    value = _clean_value(folder_url_or_id)
+
+    if not value:
+        return ""
 
     if "/folders/" in value:
         return value.split("/folders/")[1].split("?")[0].split("/")[0]
@@ -32,23 +47,39 @@ def _parse_allowed_mime_types(value) -> list[str]:
         return DEFAULT_ALLOWED_MIME_TYPES
 
     if isinstance(value, list):
-        return value
+        return [str(item).strip() for item in value if str(item).strip()]
 
     if isinstance(value, str):
         try:
             parsed = json.loads(value)
             if isinstance(parsed, list):
-                return parsed
+                return [str(item).strip() for item in parsed if str(item).strip()]
         except Exception:
             pass
 
-        return [
-            item.strip()
-            for item in value.split(",")
-            if item.strip()
-        ]
+        return [item.strip() for item in value.split(",") if item.strip()]
 
     return DEFAULT_ALLOWED_MIME_TYPES
+
+
+def _parse_folder_ids(value) -> list[str]:
+    if not value:
+        return []
+
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed if str(item).strip()]
+        except Exception:
+            pass
+
+        return [item.strip() for item in value.split(",") if item.strip()]
+
+    return []
 
 
 def _bool_value(value, default=True) -> bool:
@@ -64,6 +95,22 @@ def _bool_value(value, default=True) -> bool:
     return bool(value)
 
 
+def _drive_list_params(api_key: str, query: str, page_token: str | None = None) -> dict:
+    params = {
+        "key": api_key,
+        "q": query,
+        "fields": "nextPageToken, files(id,name,mimeType,webViewLink,modifiedTime,size,parents)",
+        "pageSize": 100,
+        "supportsAllDrives": "true",
+        "includeItemsFromAllDrives": "true",
+    }
+
+    if page_token:
+        params["pageToken"] = page_token
+
+    return params
+
+
 async def list_drive_files_direct(api_key: str, folder_id: str) -> list[dict]:
     """
     Reads files directly inside one folder only.
@@ -75,19 +122,14 @@ async def list_drive_files_direct(api_key: str, folder_id: str) -> list[dict]:
     async with httpx.AsyncClient(timeout=60) as client:
         while True:
             query = f"'{folder_id}' in parents and trashed = false"
-
-            params = {
-                "key": api_key,
-                "q": query,
-                "fields": "nextPageToken, files(id,name,mimeType,webViewLink,modifiedTime,size,parents)",
-                "pageSize": 100,
-            }
-
-            if page_token:
-                params["pageToken"] = page_token
+            params = _drive_list_params(api_key, query, page_token)
 
             response = await client.get(GOOGLE_DRIVE_FILES_URL, params=params)
-            response.raise_for_status()
+
+            if response.status_code >= 400:
+                raise Exception(
+                    f"Google Drive list error: {response.status_code} - {response.text}"
+                )
 
             data = response.json()
 
@@ -128,19 +170,14 @@ async def list_drive_files_recursive(api_key: str, parent_folder_id: str) -> lis
 
             while True:
                 query = f"'{current_folder_id}' in parents and trashed = false"
-
-                params = {
-                    "key": api_key,
-                    "q": query,
-                    "fields": "nextPageToken, files(id,name,mimeType,webViewLink,modifiedTime,size,parents)",
-                    "pageSize": 100,
-                }
-
-                if page_token:
-                    params["pageToken"] = page_token
+                params = _drive_list_params(api_key, query, page_token)
 
                 response = await client.get(GOOGLE_DRIVE_FILES_URL, params=params)
-                response.raise_for_status()
+
+                if response.status_code >= 400:
+                    raise Exception(
+                        f"Google Drive recursive list error: {response.status_code} - {response.text}"
+                    )
 
                 data = response.json()
                 files = data.get("files", [])
@@ -198,18 +235,14 @@ async def list_drive_folders_recursive(api_key: str, parent_folder_id: str) -> l
                     f"and mimeType = '{GOOGLE_FOLDER_MIME}'"
                 )
 
-                params = {
-                    "key": api_key,
-                    "q": query,
-                    "fields": "nextPageToken, files(id,name,mimeType,webViewLink,modifiedTime,parents)",
-                    "pageSize": 100,
-                }
-
-                if page_token:
-                    params["pageToken"] = page_token
+                params = _drive_list_params(api_key, query, page_token)
 
                 response = await client.get(GOOGLE_DRIVE_FILES_URL, params=params)
-                response.raise_for_status()
+
+                if response.status_code >= 400:
+                    raise Exception(
+                        f"Google Drive folder list error: {response.status_code} - {response.text}"
+                    )
 
                 data = response.json()
                 found_folders = data.get("files", [])
@@ -273,6 +306,7 @@ async def download_drive_file_text(api_key: str, file: dict) -> str:
                 params={
                     "key": api_key,
                     "mimeType": "text/plain",
+                    "supportsAllDrives": "true",
                 },
             )
 
@@ -288,6 +322,7 @@ async def download_drive_file_text(api_key: str, file: dict) -> str:
                 params={
                     "key": api_key,
                     "alt": "media",
+                    "supportsAllDrives": "true",
                 },
             )
 
@@ -303,6 +338,7 @@ async def download_drive_file_text(api_key: str, file: dict) -> str:
                 params={
                     "key": api_key,
                     "alt": "media",
+                    "supportsAllDrives": "true",
                 },
             )
 
@@ -339,11 +375,14 @@ async def delete_existing_knowledge_for_file(source_id: str) -> None:
     if not source_id:
         return
 
-    supabase.table("knowledge_base") \
-        .delete() \
-        .eq("source_type", "google_drive") \
-        .eq("source_id", source_id) \
+    (
+        supabase
+        .table("knowledge_base")
+        .delete()
+        .eq("source_type", "google_drive")
+        .eq("source_id", source_id)
         .execute()
+    )
 
 
 async def insert_knowledge_chunks_from_drive_file(file: dict, content: str) -> int:
@@ -381,17 +420,21 @@ async def insert_knowledge_chunks_from_drive_file(file: dict, content: str) -> i
 
 async def sync_google_drive_widget(widget: dict) -> dict:
     api_key = (
-        widget.get("google_drive_api_key")
-        or widget.get("api_key")
-        or widget.get("drive_api_key")
+        _clean_value(widget.get("google_drive_api_key"))
+        or _clean_value(widget.get("api_key"))
+        or _clean_value(widget.get("drive_api_key"))
     )
 
-    folder_id = (
-        widget.get("selected_folder_id")
-        or widget.get("folder_id")
-        or widget.get("parent_folder_id")
+    selected_folder_ids = _parse_folder_ids(widget.get("selected_folder_ids"))
+
+    single_folder_id = (
+        _clean_value(widget.get("selected_folder_id"))
+        or _clean_value(widget.get("folder_id"))
+        or _clean_value(widget.get("parent_folder_id"))
         or extract_folder_id(widget.get("folder_url"))
     )
+
+    folder_ids = selected_folder_ids or ([single_folder_id] if single_folder_id else [])
 
     include_subfolders = _bool_value(widget.get("include_subfolders"), default=True)
     allowed_mime_types = _parse_allowed_mime_types(widget.get("allowed_mime_types"))
@@ -400,20 +443,43 @@ async def sync_google_drive_widget(widget: dict) -> dict:
         return {
             "ok": False,
             "message": "Google Drive API key is missing.",
+            "folder_ids_used": folder_ids,
             "synced_files": 0,
         }
 
-    if not folder_id:
+    if not folder_ids:
         return {
             "ok": False,
             "message": "Google Drive folder ID is missing.",
+            "folder_ids_used": [],
             "synced_files": 0,
         }
 
-    if include_subfolders:
-        files = await list_drive_files_recursive(api_key, folder_id)
-    else:
-        files = await list_drive_files_direct(api_key, folder_id)
+    try:
+        files = []
+        seen_file_ids = set()
+
+        for folder_id in folder_ids:
+            if include_subfolders:
+                folder_files = await list_drive_files_recursive(api_key, folder_id)
+            else:
+                folder_files = await list_drive_files_direct(api_key, folder_id)
+
+            for file in folder_files:
+                file_id = file.get("id")
+
+                if file_id and file_id not in seen_file_ids:
+                    seen_file_ids.add(file_id)
+                    files.append(file)
+
+    except Exception as exc:
+        return {
+            "ok": False,
+            "message": str(exc),
+            "folder_ids_used": folder_ids,
+            "synced_files": 0,
+            "total_files_found": 0,
+        }
 
     synced_files = 0
     skipped_files = 0
@@ -462,6 +528,7 @@ async def sync_google_drive_widget(widget: dict) -> dict:
             f"Google Drive sync completed. "
             f"{synced_files} files synced, {total_chunks} knowledge chunks created."
         ),
+        "folder_ids_used": folder_ids,
         "synced_files": synced_files,
         "skipped_files": skipped_files,
         "total_files_found": len(files),
