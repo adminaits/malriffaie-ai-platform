@@ -123,6 +123,7 @@ const defaults = {
     folder_url: '',
     parent_folder_id: '',
     selected_folder_id: '',
+    selected_folder_ids: [],
     include_subfolders: true,
     allowed_mime_types: [
       'application/pdf',
@@ -204,6 +205,21 @@ function cleanPayload(table, form) {
         'application/vnd.google-apps.document',
         'text/plain'
       ];
+    }
+
+    if (payload.selected_folder_ids && typeof payload.selected_folder_ids === 'string') {
+      try {
+        payload.selected_folder_ids = JSON.parse(payload.selected_folder_ids);
+      } catch {
+        payload.selected_folder_ids = payload.selected_folder_ids
+          .split(',')
+          .map(x => x.trim())
+          .filter(Boolean);
+      }
+    }
+
+    if (!payload.selected_folder_ids || !Array.isArray(payload.selected_folder_ids)) {
+      payload.selected_folder_ids = [];
     }
 
     payload.include_subfolders = !!payload.include_subfolders;
@@ -292,6 +308,24 @@ function DriveForm({ form, setForm }) {
   const [folderLoading, setFolderLoading] = useState(false);
   const [folderError, setFolderError] = useState('');
 
+  const selectedFolderIds = Array.isArray(form.selected_folder_ids)
+    ? form.selected_folder_ids
+    : (() => {
+        if (!form.selected_folder_ids) return [];
+        if (typeof form.selected_folder_ids === 'string') {
+          try {
+            const parsed = JSON.parse(form.selected_folder_ids);
+            return Array.isArray(parsed) ? parsed : [];
+          } catch {
+            return form.selected_folder_ids
+              .split(',')
+              .map(x => x.trim())
+              .filter(Boolean);
+          }
+        }
+        return [];
+      })();
+
   const allowedMimeValue = Array.isArray(form.allowed_mime_types)
     ? JSON.stringify(form.allowed_mime_types, null, 2)
     : (
@@ -302,6 +336,16 @@ function DriveForm({ form, setForm }) {
         'text/plain'
       ], null, 2)
     );
+
+  const selectedFolderIdsValue = JSON.stringify(selectedFolderIds, null, 2);
+
+  function updateSelectedFolders(ids) {
+    setForm(f => ({
+      ...f,
+      selected_folder_ids: ids,
+      selected_folder_id: ids[0] || ''
+    }));
+  }
 
   async function loadFolders() {
     setFolderError('');
@@ -372,7 +416,7 @@ function DriveForm({ form, setForm }) {
 
       <Field
         label="Selected Folder ID"
-        help="Optional. If filled, sync will use this selected folder instead of the parent folder."
+        help="Optional single folder ID. This is automatically filled with the first selected folder."
       >
         <Text
           value={form.selected_folder_id || ''}
@@ -381,8 +425,26 @@ function DriveForm({ form, setForm }) {
       </Field>
 
       <Field
+        label="Selected Folder IDs"
+        help="Optional JSON list for multiple selected folders. The sync will read each selected folder."
+      >
+        <Textarea
+          rows={4}
+          value={selectedFolderIdsValue}
+          onChange={v => {
+            try {
+              const parsed = JSON.parse(v);
+              updateSelectedFolders(Array.isArray(parsed) ? parsed : []);
+            } catch {
+              set('selected_folder_ids', v);
+            }
+          }}
+        />
+      </Field>
+
+      <Field
         label="Folder selector"
-        help="Save the widget first, then click Load folders to select a subfolder."
+        help="Save the widget first, then click Load folders. Hold Ctrl on Windows or Cmd on Mac to select multiple folders."
       >
         <div className="inlineActions">
           <button
@@ -393,28 +455,48 @@ function DriveForm({ form, setForm }) {
           >
             <RefreshCw size={16} /> {folderLoading ? 'Loading...' : 'Load folders'}
           </button>
+
+          {selectedFolderIds.length > 0 && (
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => updateSelectedFolders([])}
+            >
+              Clear selected folders
+            </button>
+          )}
         </div>
 
         {folderError && <pre className="error">{folderError}</pre>}
 
         {folders.length > 0 && (
-          <select
-            value={form.selected_folder_id || ''}
-            onChange={e => set('selected_folder_id', e.target.value)}
-          >
-            <option value="">Use parent folder</option>
-            {folders.map(folder => (
-              <option key={folder.id} value={folder.id}>
-                {folder.path || folder.name}
-              </option>
-            ))}
-          </select>
+          <div>
+            <select
+              multiple
+              size={Math.min(10, Math.max(4, folders.length))}
+              value={selectedFolderIds}
+              onChange={e => {
+                const ids = Array.from(e.target.selectedOptions).map(option => option.value);
+                updateSelectedFolders(ids);
+              }}
+            >
+              {folders.map(folder => (
+                <option key={folder.id} value={folder.id}>
+                  {folder.path || folder.name}
+                </option>
+              ))}
+            </select>
+
+            <small>
+              Selected folders: {selectedFolderIds.length || 0}. If none are selected, sync will use the parent folder.
+            </small>
+          </div>
         )}
       </Field>
 
       <Field
         label="Include subfolders"
-        help="If enabled, sync will fetch files from the selected folder and all nested subfolders."
+        help="If enabled, sync will fetch files from each selected folder and all nested subfolders."
       >
         <Check
           checked={form.include_subfolders ?? true}
