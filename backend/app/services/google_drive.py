@@ -7,6 +7,7 @@ from app.db import supabase
 
 GOOGLE_DRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files"
 GOOGLE_FOLDER_MIME = "application/vnd.google-apps.folder"
+GOOGLE_SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
 
 DEFAULT_ALLOWED_MIME_TYPES = [
     "application/pdf",
@@ -99,7 +100,7 @@ def _drive_list_params(api_key: str, query: str, page_token: str | None = None) 
     params = {
         "key": api_key,
         "q": query,
-        "fields": "nextPageToken, files(id,name,mimeType,webViewLink,modifiedTime,size,parents)",
+        "fields": "nextPageToken, files(id,name,mimeType,webViewLink,modifiedTime,size,parents,shortcutDetails)",
         "pageSize": 100,
         "supportsAllDrives": "true",
         "includeItemsFromAllDrives": "true",
@@ -112,10 +113,6 @@ def _drive_list_params(api_key: str, query: str, page_token: str | None = None) 
 
 
 async def list_drive_files_direct(api_key: str, folder_id: str) -> list[dict]:
-    """
-    Reads files directly inside one folder only.
-    Does not scan subfolders.
-    """
     all_files = []
     page_token = None
 
@@ -146,14 +143,6 @@ async def list_drive_files_direct(api_key: str, folder_id: str) -> list[dict]:
 
 
 async def list_drive_files_recursive(api_key: str, parent_folder_id: str) -> list[dict]:
-    """
-    Reads all files inside:
-    - parent folder
-    - subfolders
-    - nested subfolders
-
-    Folders are scanned, not inserted as files.
-    """
     all_files = []
     folders_to_scan = [parent_folder_id]
     scanned_folders = set()
@@ -201,10 +190,6 @@ async def list_drive_files_recursive(api_key: str, parent_folder_id: str) -> lis
 
 
 async def list_drive_folders_recursive(api_key: str, parent_folder_id: str) -> list[dict]:
-    """
-    Returns all folders under a parent folder.
-    This is for the admin dashboard folder selector.
-    """
     folders = []
     folders_to_scan = [
         {
@@ -291,63 +276,153 @@ def extract_pdf_text(pdf_bytes: bytes) -> str:
         return ""
 
 
-async def download_drive_file_text(api_key: str, file: dict) -> str:
+async def download_drive_file_text(api_key: str, file: dict) -> dict:
+    """
+    Returns:
+    {
+      "text": "...",
+      "error": None
+    }
+
+    or:
+    {
+      "text": "",
+      "error": "real reason here"
+    }
+    """
     file_id = file.get("id")
     mime_type = file.get("mimeType")
+    file_name = file.get("name")
 
     if not file_id:
-        return ""
+        return {
+            "text": "",
+            "error": "Missing Google Drive file ID",
+        }
+
+    if mime_type == GOOGLE_SHORTCUT_MIME:
+        shortcut = file.get("shortcutDetails") or {}
+        target_id = shortcut.get("targetId")
+        target_mime = shortcut.get("targetMimeType")
+
+        return {
+            "text": "",
+            "error": (
+                "This file is a Google Drive shortcut. "
+                f"Target ID: {target_id or 'unknown'}, "
+                f"Target MIME type: {target_mime or 'unknown'}. "
+                "Select the real target folder/file instead of the shortcut."
+            ),
+        }
 
     async with httpx.AsyncClient(timeout=120) as client:
-        if mime_type == "application/vnd.google-apps.document":
-            url = f"https://www.googleapis.com/drive/v3/files/{file_id}/export"
-            response = await client.get(
-                url,
-                params={
-                    "key": api_key,
-                    "mimeType": "text/plain",
-                    "supportsAllDrives": "true",
-                },
-            )
+        try:
+            if mime_type == "application/vnd.google-apps.document":
+                url = f"https://www.googleapis.com/drive/v3/files/{file_id}/export"
 
-            if response.status_code >= 400:
-                return ""
+                response = await client.get(
+                    url,
+                    params={
+                        "key": api_key,
+                        "mimeType": "text/plain",
+                        "supportsAllDrives": "true",
+                    },
+                )
 
-            return response.text.strip()
+                if response.status_code >= 400:
+                    return {
+                        "text": "",
+                        "error": f"Google Doc export failed {response.status_code}: {response.text}",
+                    }
 
-        if mime_type == "text/plain":
-            url = f"https://www.googleapis.com/drive/v3/files/{file_id}"
-            response = await client.get(
-                url,
-                params={
-                    "key": api_key,
-                    "alt": "media",
-                    "supportsAllDrives": "true",
-                },
-            )
+                text = response.text.strip()
 
-            if response.status_code >= 400:
-                return ""
+                if not text:
+                    return {
+                        "text": "",
+                        "error": "Google Doc exported successfully but returned empty text",
+                    }
 
-            return response.text.strip()
+                return {
+                    "text": text,
+                    "error": None,
+                }
 
-        if mime_type == "application/pdf":
-            url = f"https://www.googleapis.com/drive/v3/files/{file_id}"
-            response = await client.get(
-                url,
-                params={
-                    "key": api_key,
-                    "alt": "media",
-                    "supportsAllDrives": "true",
-                },
-            )
+            if mime_type == "text/plain":
+                url = f"https://www.googleapis.com/drive/v3/files/{file_id}"
 
-            if response.status_code >= 400:
-                return ""
+                response = await client.get(
+                    url,
+                    params={
+                        "key": api_key,
+                        "alt": "media",
+                        "supportsAllDrives": "true",
+                    },
+                )
 
-            return extract_pdf_text(response.content)
+                if response.status_code >= 400:
+                    return {
+                        "text": "",
+                        "error": f"Text file download failed {response.status_code}: {response.text}",
+                    }
 
-        return ""
+                text = response.text.strip()
+
+                if not text:
+                    return {
+                        "text": "",
+                        "error": "Text file downloaded but was empty",
+                    }
+
+                return {
+                    "text": text,
+                    "error": None,
+                }
+
+            if mime_type == "application/pdf":
+                url = f"https://www.googleapis.com/drive/v3/files/{file_id}"
+
+                response = await client.get(
+                    url,
+                    params={
+                        "key": api_key,
+                        "alt": "media",
+                        "supportsAllDrives": "true",
+                    },
+                )
+
+                if response.status_code >= 400:
+                    return {
+                        "text": "",
+                        "error": f"PDF download failed {response.status_code}: {response.text}",
+                    }
+
+                text = extract_pdf_text(response.content)
+
+                if not text:
+                    return {
+                        "text": "",
+                        "error": (
+                            "PDF downloaded but no selectable text was found. "
+                            "It may be a scanned/image PDF and needs OCR or conversion to Google Docs."
+                        ),
+                    }
+
+                return {
+                    "text": text,
+                    "error": None,
+                }
+
+            return {
+                "text": "",
+                "error": f"Unsupported MIME type: {mime_type}",
+            }
+
+        except Exception as exc:
+            return {
+                "text": "",
+                "error": f"Download/extraction exception for {file_name}: {str(exc)}",
+            }
 
 
 def chunk_text(text: str, max_chars: int = 3500) -> list[str]:
@@ -493,19 +568,25 @@ async def sync_google_drive_widget(widget: dict) -> dict:
             skipped_files += 1
             skipped_details.append({
                 "name": file.get("name"),
+                "id": file.get("id"),
                 "mimeType": mime_type,
                 "reason": "File type not allowed by widget settings",
+                "webViewLink": file.get("webViewLink"),
             })
             continue
 
-        content = await download_drive_file_text(api_key, file)
+        download_result = await download_drive_file_text(api_key, file)
+        content = download_result.get("text", "")
+        download_error = download_result.get("error")
 
         if not content:
             skipped_files += 1
             skipped_details.append({
                 "name": file.get("name"),
+                "id": file.get("id"),
                 "mimeType": mime_type,
-                "reason": "No extractable text or unsupported file type",
+                "reason": download_error or "No extractable text or unsupported file type",
+                "webViewLink": file.get("webViewLink"),
             })
             continue
 
@@ -518,8 +599,10 @@ async def sync_google_drive_widget(widget: dict) -> dict:
             skipped_files += 1
             skipped_details.append({
                 "name": file.get("name"),
+                "id": file.get("id"),
                 "mimeType": mime_type,
                 "reason": "No chunks inserted",
+                "webViewLink": file.get("webViewLink"),
             })
 
     return {
