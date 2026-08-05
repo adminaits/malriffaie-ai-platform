@@ -3,58 +3,145 @@ const API_URL =
   import.meta.env.VITE_API_URL ||
   'http://localhost:8000';
 
+function cleanBaseUrl(url) {
+  return String(url || '').trim().replace(/\/$/, '');
+}
+
+const BASE_URL = cleanBaseUrl(API_URL);
+
 export function getAdminToken() {
-  return localStorage.getItem('admin_token') || '';
+  return (
+    localStorage.getItem('admin_token') ||
+    localStorage.getItem('adminToken') ||
+    localStorage.getItem('token') ||
+    sessionStorage.getItem('admin_token') ||
+    sessionStorage.getItem('adminToken') ||
+    sessionStorage.getItem('token') ||
+    ''
+  );
 }
 
 export function setAdminToken(token) {
-  if (token) localStorage.setItem('admin_token', token);
-  else localStorage.removeItem('admin_token');
+  if (token) {
+    localStorage.setItem('admin_token', token);
+    localStorage.setItem('adminToken', token);
+  } else {
+    localStorage.removeItem('admin_token');
+    localStorage.removeItem('adminToken');
+    localStorage.removeItem('token');
+    sessionStorage.removeItem('admin_token');
+    sessionStorage.removeItem('adminToken');
+    sessionStorage.removeItem('token');
+  }
 }
 
 export function getClientToken() {
-  return localStorage.getItem('client_token') || '';
+  return (
+    localStorage.getItem('client_token') ||
+    localStorage.getItem('clientToken') ||
+    sessionStorage.getItem('client_token') ||
+    sessionStorage.getItem('clientToken') ||
+    ''
+  );
 }
 
 export function setClientToken(token) {
-  if (token) localStorage.setItem('client_token', token);
-  else localStorage.removeItem('client_token');
+  if (token) {
+    localStorage.setItem('client_token', token);
+    localStorage.setItem('clientToken', token);
+  } else {
+    localStorage.removeItem('client_token');
+    localStorage.removeItem('clientToken');
+    sessionStorage.removeItem('client_token');
+    sessionStorage.removeItem('clientToken');
+  }
+}
+
+function isAdminRoute(path) {
+  return (
+    path.startsWith('/api/admin') ||
+    path.startsWith('/api/integrations') ||
+    path.startsWith('/api/auth/me') ||
+    path.startsWith('/api/auth/change-password')
+  );
+}
+
+function isClientRoute(path) {
+  return path.startsWith('/api/auth/client/');
+}
+
+async function parseErrorResponse(res) {
+  let message = '';
+
+  try {
+    const text = await res.text();
+
+    if (!text) {
+      return `Request failed with status ${res.status}`;
+    }
+
+    try {
+      const data = JSON.parse(text);
+      message = data.detail || data.message || JSON.stringify(data);
+    } catch {
+      message = text;
+    }
+  } catch {
+    message = `Request failed with status ${res.status}`;
+  }
+
+  return message || `Request failed with status ${res.status}`;
 }
 
 export async function api(path, options = {}) {
-  const token = getAdminToken();
+  const adminToken = getAdminToken();
+  const clientToken = getClientToken();
 
   const headers = {
     'Content-Type': 'application/json',
     ...(options.headers || {}),
   };
 
-  const isAdminRoute =
-    path.startsWith('/api/admin') ||
-    path.startsWith('/api/integrations') ||
-    path.startsWith('/api/auth/me') ||
-    path.startsWith('/api/auth/change-password');
-
-  if (token && isAdminRoute) {
-    headers.Authorization = `Bearer ${token}`;
+  if (adminToken && isAdminRoute(path)) {
+    headers.Authorization = `Bearer ${adminToken}`;
   }
 
-  const clientToken = getClientToken();
-
-  if (clientToken && path.startsWith('/api/auth/client/')) {
+  if (clientToken && isClientRoute(path)) {
     headers.Authorization = `Bearer ${clientToken}`;
   }
 
-  const res = await fetch(`${API_URL}${path}`, {
-    ...options,
-    headers,
-  });
+  let res;
 
-  if (!res.ok) {
-    throw new Error(await res.text());
+  try {
+    res = await fetch(`${BASE_URL}${path}`, {
+      ...options,
+      headers,
+    });
+  } catch (error) {
+    throw new Error(
+      `Failed to fetch. Please check that the backend is running, Render is awake, and VITE_API_BASE_URL is correct. Current API URL: ${BASE_URL}`
+    );
   }
 
-  return res.json();
+  if (!res.ok) {
+    throw new Error(await parseErrorResponse(res));
+  }
+
+  if (res.status === 204) {
+    return null;
+  }
+
+  const text = await res.text();
+
+  if (!text) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
 }
 
 // Admin auth
@@ -64,7 +151,8 @@ export const loginAdmin = (payload) =>
     body: JSON.stringify(payload),
   });
 
-export const adminMe = () => api('/api/auth/me');
+export const adminMe = () =>
+  api('/api/auth/me');
 
 export const changeAdminPassword = (payload) =>
   api('/api/auth/change-password', {
@@ -72,14 +160,18 @@ export const changeAdminPassword = (payload) =>
     body: JSON.stringify(payload),
   });
 
-export const logoutAdmin = () => setAdminToken('');
+export const logoutAdmin = () =>
+  setAdminToken('');
 
 // Public frontend data
-export const getProducts = () => api('/api/products');
+export const getProducts = () =>
+  api('/api/products');
 
-export const getServices = () => api('/api/services');
+export const getServices = () =>
+  api('/api/services');
 
-export const getChatSettings = () => api('/api/settings/chat');
+export const getChatSettings = () =>
+  api('/api/settings/chat');
 
 export const sendChat = (payload) =>
   api('/api/chat', {
@@ -159,4 +251,5 @@ export const changeClientPassword = (payload) =>
     body: JSON.stringify(payload),
   });
 
-export const logoutClient = () => setClientToken('');
+export const logoutClient = () =>
+  setClientToken('');
