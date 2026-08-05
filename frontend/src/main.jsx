@@ -1,10 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Send, ShoppingCart, Settings, Save, Trash2, Pencil, Plus, TestTube, RefreshCw, Download, Lock, LogOut, KeyRound, UserPlus, UserRound, Loader2 } from 'lucide-react';
-import { getProducts, getServices, getChatSettings, sendChat, adminList, adminCreate, adminUpdate, adminDelete, testHuggingFace, syncDriveWidget, exportLeadsCsv, loginAdmin, adminMe, changeAdminPassword, logoutAdmin, setAdminToken, registerClient, loginClient, clientMe, logoutClient, setClientToken } from './lib/api';
+import { getProducts, getServices, getChatSettings, sendChat, adminList, adminCreate, adminUpdate, adminDelete, testHuggingFace, syncDriveWidget, listDriveFolders, exportLeadsCsv, loginAdmin, adminMe, changeAdminPassword, logoutAdmin, setAdminToken, registerClient, loginClient, clientMe, logoutClient, setClientToken } from './lib/api';
 import './styles.css';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || '';
 
 function getStoredAdminToken() {
   return (
@@ -19,20 +19,29 @@ function getStoredAdminToken() {
 }
 
 async function listDriveFoldersForWidget(widgetId) {
-  const token = getStoredAdminToken();
-  const res = await fetch(`${API_BASE_URL}/api/integrations/drive/folders/${widgetId}`, {
-    method: 'GET',
-    headers: {
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-  });
+  try {
+    return await listDriveFolders(widgetId);
+  } catch (apiError) {
+    const token = getStoredAdminToken();
 
-  if (!res.ok) {
-    const msg = await res.text();
-    throw new Error(msg || 'Failed to load Google Drive folders.');
+    if (!API_BASE_URL) {
+      throw apiError;
+    }
+
+    const res = await fetch(`${API_BASE_URL}/api/integrations/drive/folders/${widgetId}`, {
+      method: 'GET',
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+    });
+
+    if (!res.ok) {
+      const msg = await res.text();
+      throw new Error(msg || 'Failed to load Google Drive folders.');
+    }
+
+    return await res.json();
   }
-
-  return await res.json();
 }
 
 function useVisitorId() {
@@ -811,7 +820,7 @@ function AdminPage() {
   const [tab, setTab] = useState('ai_settings'); const [rows, setRows] = useState([]); const [form, setForm] = useState(defaults.ai_settings); const [editingId, setEditingId] = useState(null); const [error, setError] = useState(''); const [notice, setNotice] = useState(''); const [showPassword, setShowPassword] = useState(false); const [syncingIds, setSyncingIds] = useState({}); const [syncProgress, setSyncProgress] = useState({});
   const settingTables = ['ai_settings','chat_settings','booking_settings','payment_settings','email_settings'];
   async function load(t=tab) { try { const data = await adminList(t); setRows(data); setError(''); if (settingTables.includes(t) && data?.[0]) { setForm({ ...(defaults[t] || {}), ...data[0] }); setEditingId(data[0].id); } else { setForm(defaults[t] || {}); setEditingId(null); } } catch(e){ setError(e.message); } }
-  useEffect(()=>{ load(tab); }, [tab]);
+  useEffect(()=>{ load(tab); setError(''); setNotice(''); if (tab !== 'google_drive_widgets') setSyncProgress({}); }, [tab]);
   async function save() { try { const payload = cleanPayload(tab, form); if (editingId) await adminUpdate(tab, editingId, payload); else await adminCreate(tab, payload); setNotice('Saved successfully.'); await load(); } catch(e){ setError(e.message); } }
   function edit(row) { setEditingId(row.id); setForm({ ...(defaults[tab] || {}), ...row }); window.scrollTo({ top: 0, behavior: 'smooth' }); }
   function addNew() { setEditingId(null); setForm(defaults[tab] || {}); }
@@ -821,12 +830,20 @@ function AdminPage() {
     try {
       setError('');
       setNotice('Google Drive sync started. Please wait...');
+
+      setSyncProgress(prev => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+
       setSyncingIds(prev => ({ ...prev, [id]: true }));
+
       setSyncProgress(prev => ({
         ...prev,
         [id]: {
           status: 'Syncing...',
-          message: 'Scanning selected folders and extracting supported files.',
+          message: 'Scanning selected folders and extracting supported files. This may take a few minutes for large PDFs.',
           startedAt: new Date().toLocaleTimeString()
         }
       }));
@@ -834,6 +851,7 @@ function AdminPage() {
       const res = await syncDriveWidget(id);
 
       const details = [
+        `Folders: ${(res.folder_ids_used || []).length}`,
         `Files found: ${res.total_files_found ?? 0}`,
         `Files synced: ${res.synced_files ?? 0}`,
         `Chunks created: ${res.total_chunks ?? 0}`,
@@ -841,12 +859,14 @@ function AdminPage() {
       ].join(' | ');
 
       const message = res.message || 'Sync completed.';
+      const finalStatus = res.ok === false ? 'Failed' : 'Completed';
 
       setNotice(`${message} ${details}`);
+
       setSyncProgress(prev => ({
         ...prev,
         [id]: {
-          status: res.ok === false ? 'Failed' : 'Completed',
+          status: finalStatus,
           message: `${message} ${details}`,
           completedAt: new Date().toLocaleTimeString(),
           result: res
@@ -855,12 +875,18 @@ function AdminPage() {
 
       await load();
     } catch(e) {
-      setError(e.message);
+      const rawMessage = e?.message || 'Sync failed.';
+      const friendlyMessage = rawMessage === 'Failed to fetch'
+        ? 'Failed to fetch. Check that the Render backend is awake, VITE_API_BASE_URL points to the Render backend, and CORS allows your Vercel domain.'
+        : rawMessage;
+
+      setError(friendlyMessage);
+
       setSyncProgress(prev => ({
         ...prev,
         [id]: {
           status: 'Failed',
-          message: e.message || 'Sync failed.',
+          message: friendlyMessage,
           completedAt: new Date().toLocaleTimeString()
         }
       }));
@@ -873,7 +899,7 @@ function AdminPage() {
     }
   }
   async function downloadLeads() { try { const res = await exportLeadsCsv(); const blob = new Blob([res.csv || ''], { type:'text/csv' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'leads.csv'; a.click(); URL.revokeObjectURL(url); } catch(e){ setError(e.message); } }
-  return <div className="adminShell"><aside className="adminNav"><h2>Admin Dashboard</h2><p>Settings, CRUD, bookings, leads, and history.</p>{tabs.map(([key,label])=><button className={tab===key?'active':''} onClick={()=>setTab(key)} key={key}>{label}</button>)}</aside><main className="adminMain"><div className="adminHeader"><div><h1>{tabs.find(x=>x[0]===tab)?.[1]}</h1><p>{editingId ? 'Editing existing record.' : 'Create or configure a new record.'}</p></div><div className="adminTopActions"><button className="secondary" onClick={()=>setShowPassword(true)}><KeyRound size={16}/> Change Password</button><button className="secondary" onClick={()=>{ logoutAdmin(); location.reload(); }}><LogOut size={16}/> Logout</button><button className="secondary" onClick={addNew}><Plus size={16}/> New</button></div></div>{showPassword && <ChangePasswordModal onClose={()=>setShowPassword(false)} />}{error && <pre className="error">{error}</pre>}{notice && <div className="notice">{notice}</div>}<section className="panel"><FormFor table={tab} form={form} setForm={setForm}/><div className="actions"><button onClick={save}><Save size={16}/> {editingId ? 'Update' : 'Create'}</button>{tab==='ai_settings' && <button className="secondary" onClick={runTestHF}><TestTube size={16}/> Test Saved AI Connection</button>}{tab==='leads' && <button className="secondary" onClick={downloadLeads}><Download size={16}/> Export CSV</button>}</div></section>{tab==='google_drive_widgets' && Object.keys(syncProgress).length > 0 && <section className="panel"><h3>Google Drive Sync Progress</h3>{Object.entries(syncProgress).map(([id, item]) => <div key={id} className="notice"><b>{item.status}</b>{item.startedAt && <span> Started: {item.startedAt}</span>}{item.completedAt && <span> Completed: {item.completedAt}</span>}<br/><span>{item.message}</span>{item.result?.skipped_details?.length > 0 && <details><summary>Skipped files</summary><pre>{JSON.stringify(item.result.skipped_details, null, 2)}</pre></details>}</div>)}</section>}<section className="panel"><h3>Existing Records</h3><div className="tableWrap"><table><thead><tr>{Object.keys(rows[0]||{id:'', name:'', created_at:''}).map(k=><th key={k}>{k}</th>)}<th>Actions</th></tr></thead><tbody>{rows.map(r=><tr key={r.id}>{Object.keys(rows[0]||{}).map(k=><td key={k}>{typeof r[k]==='object'?JSON.stringify(r[k]):String(r[k] ?? '')}</td>)}<td className="rowActions"><button className="small" onClick={()=>edit(r)}><Pencil size={14}/> Edit</button>{tab==='google_drive_widgets' && <button className="small" disabled={!!syncingIds[r.id]} onClick={()=>syncDrive(r.id)}>{syncingIds[r.id] ? <Loader2 size={14} className="spinIcon"/> : <RefreshCw size={14}/>} {syncingIds[r.id] ? 'Syncing...' : 'Sync'}</button>}<button className="small danger" onClick={()=>remove(r.id)}><Trash2 size={14}/> Delete</button></td></tr>)}</tbody></table></div></section></main></div>;
+  return <div className="adminShell"><aside className="adminNav"><h2>Admin Dashboard</h2><p>Settings, CRUD, bookings, leads, and history.</p>{tabs.map(([key,label])=><button className={tab===key?'active':''} onClick={()=>setTab(key)} key={key}>{label}</button>)}</aside><main className="adminMain"><div className="adminHeader"><div><h1>{tabs.find(x=>x[0]===tab)?.[1]}</h1><p>{editingId ? 'Editing existing record.' : 'Create or configure a new record.'}</p></div><div className="adminTopActions"><button className="secondary" onClick={()=>setShowPassword(true)}><KeyRound size={16}/> Change Password</button><button className="secondary" onClick={()=>{ logoutAdmin(); location.reload(); }}><LogOut size={16}/> Logout</button><button className="secondary" onClick={addNew}><Plus size={16}/> New</button></div></div>{showPassword && <ChangePasswordModal onClose={()=>setShowPassword(false)} />}{error && <pre className="error">{error}</pre>}{notice && <div className="notice">{notice}</div>}<section className="panel"><FormFor table={tab} form={form} setForm={setForm}/><div className="actions"><button onClick={save}><Save size={16}/> {editingId ? 'Update' : 'Create'}</button>{tab==='ai_settings' && <button className="secondary" onClick={runTestHF}><TestTube size={16}/> Test Saved AI Connection</button>}{tab==='leads' && <button className="secondary" onClick={downloadLeads}><Download size={16}/> Export CSV</button>}</div></section>{tab==='google_drive_widgets' && Object.keys(syncProgress).length > 0 && <section className="panel"><h3>Google Drive Sync Progress</h3>{Object.entries(syncProgress).map(([id, item]) => <div key={id} className={item.status === 'Failed' ? 'error' : 'notice'}><b>{item.status}</b><span> Row: {id.slice(0, 8)}...</span>{item.startedAt && <span> Started: {item.startedAt}</span>}{item.completedAt && <span> Completed: {item.completedAt}</span>}<br/><span>{item.message}</span>{item.result?.folder_ids_used?.length > 0 && <details><summary>Folders used</summary><pre>{JSON.stringify(item.result.folder_ids_used, null, 2)}</pre></details>}{item.result?.skipped_details?.length > 0 && <details><summary>Skipped files</summary><pre>{JSON.stringify(item.result.skipped_details, null, 2)}</pre></details>}</div>)}</section>}<section className="panel"><h3>Existing Records</h3><div className="tableWrap"><table><thead><tr>{Object.keys(rows[0]||{id:'', name:'', created_at:''}).map(k=><th key={k}>{k}</th>)}<th>Actions</th></tr></thead><tbody>{rows.map(r=><tr key={r.id}>{Object.keys(rows[0]||{}).map(k=><td key={k}>{typeof r[k]==='object'?JSON.stringify(r[k]):String(r[k] ?? '')}</td>)}<td className="rowActions"><button className="small" onClick={()=>edit(r)}><Pencil size={14}/> Edit</button>{tab==='google_drive_widgets' && <button className="small" disabled={!!syncingIds[r.id]} onClick={()=>syncDrive(r.id)}>{syncingIds[r.id] ? <Loader2 size={14} className="spinIcon"/> : <RefreshCw size={14}/>} {syncingIds[r.id] ? 'Syncing...' : 'Sync'}</button>}<button className="small danger" onClick={()=>remove(r.id)}><Trash2 size={14}/> Delete</button></td></tr>)}</tbody></table></div></section></main></div>;
 }
 
 function App(){ const path = location.pathname; if (path.startsWith('/admin')) return <AdminAuthGate/>; if (path.startsWith('/client-register')) return <ClientAuthPage mode="register"/>; if (path.startsWith('/client-login')) return <ClientAuthPage mode="login"/>; if (path.startsWith('/client-dashboard')) return <ClientDashboard/>; return <ChatPage/>; }
