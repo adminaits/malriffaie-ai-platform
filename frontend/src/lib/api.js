@@ -91,11 +91,6 @@ export const sendChat = (payload) =>
 export const adminList = (table) =>
   api(`/api/admin/${table}`);
 
-export const listDriveFolders = (id) =>
-  api(`/api/integrations/drive/folders/${id}`, {
-    method: 'GET',
-  });
-
 export const adminCreate = (table, payload) =>
   api(`/api/admin/${table}`, {
     method: 'POST',
