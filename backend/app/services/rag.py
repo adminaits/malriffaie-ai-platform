@@ -242,7 +242,11 @@ def _private_knowledge_match_exists(query: str) -> bool:
         if not _is_private_row(item):
             continue
 
-        if _score_knowledge_row(item, query_text) > 0:
+        score = _score_knowledge_row(item, query_text)
+
+        # Require a stronger match so normal public questions like
+        # "products list", "services", or "book consultation" are not blocked.
+        if score >= 2:
             return True
 
     return False
@@ -396,6 +400,85 @@ def _wants_service_list(message: str) -> bool:
             "what services",
             "available services",
         ]
+    )
+
+
+def _is_public_product_or_service_question(message: str) -> bool:
+    low = (message or "").lower().strip()
+
+    public_phrases = [
+        "products",
+        "product list",
+        "products list",
+        "list products",
+        "show products",
+        "services",
+        "service list",
+        "services list",
+        "list services",
+        "show services",
+        "book",
+        "booking",
+        "consultation",
+        "online consultation",
+        "price",
+        "cost",
+        "how much",
+        "what do you sell",
+        "what services",
+        "what products",
+        "feasibility",
+        "marketing",
+        "partnership",
+        "agreement",
+        "hr manual",
+        "retainer",
+    ]
+
+    return any(phrase in low for phrase in public_phrases)
+
+
+def _wants_booking(message: str) -> bool:
+    low = (message or "").lower()
+
+    return any(
+        phrase in low
+        for phrase in [
+            "book",
+            "booking",
+            "online consultation",
+            "book consultation",
+            "book an online consultation",
+            "appointment",
+            "schedule",
+        ]
+    )
+
+
+def _booking_answer(services: list[dict]) -> str:
+    consultation = None
+
+    for service in services:
+        name = (service.get("name") or "").lower()
+        if "consultation" in name:
+            consultation = service
+            break
+
+    if consultation:
+        return "\n".join(
+            [
+                "You can book an online consultation.",
+                "",
+                f"Service: {consultation.get('name')}",
+                f"Price: {_format_price(consultation.get('price'), consultation.get('currency'))}",
+                "",
+                "Please continue with the booking flow or contact info@malriffaie.com if you need help choosing a time.",
+            ]
+        )
+
+    return (
+        "You can book a consultation. Please use the booking option, "
+        "or contact info@malriffaie.com if you need help choosing a time."
     )
 
 
@@ -593,13 +676,8 @@ async def answer_chat(
 ) -> dict:
     cfg = _latest_ai_settings()
 
-    if not client_logged_in and _private_knowledge_match_exists(message):
-        return {
-            "answer": PRIVATE_KNOWLEDGE_MESSAGE,
-            "products": [],
-            "sources": [],
-        }
-
+    # Public users get public knowledge only.
+    # Logged-in clients/admins get public + private/internal wiki knowledge.
     ctx = retrieve_context(
         message,
         include_private=client_logged_in,
@@ -608,17 +686,25 @@ async def answer_chat(
     recommended = recommend_products(message, ctx["products"])
     answer = None
 
+    # 1. Public product list questions must always be allowed.
     if _wants_product_list(message):
         answer = _product_list_answer(ctx["products"])
         recommended = ctx["products"][:6]
 
+    # 2. Public service list questions must always be allowed.
     elif _wants_service_list(message):
         answer = _service_list_answer(ctx["services"])
+        recommended = ctx["products"][:3]
+
+    # 3. Booking/consultation questions must always be allowed.
+    elif _wants_booking(message):
+        answer = _booking_answer(ctx["services"])
         recommended = ctx["products"][:3]
 
     else:
         product = _matched_product(message, ctx["products"])
 
+        # 4. Public product detail questions must always be allowed.
         if product and any(
             k in message.lower()
             for k in [
@@ -638,6 +724,7 @@ async def answer_chat(
             answer = _product_detail_answer(product)
             recommended = [product]
 
+        # 5. Public recommendation/product/service questions must be allowed.
         elif _should_answer_deterministically(message):
             answer, recommended = _recommendation_answer(
                 message,
@@ -645,6 +732,20 @@ async def answer_chat(
                 ctx["services"],
             )
 
+    # 6. Only block private/internal knowledge questions after public answers fail.
+    if (
+        answer is None
+        and not client_logged_in
+        and not _is_public_product_or_service_question(message)
+        and _private_knowledge_match_exists(message)
+    ):
+        return {
+            "answer": PRIVATE_KNOWLEDGE_MESSAGE,
+            "products": [],
+            "sources": [],
+        }
+
+    # 7. If no deterministic public answer, use AI with allowed context.
     if answer is None:
         prompt_template = cfg.get("system_prompt") or DEFAULT_PROMPT
 
