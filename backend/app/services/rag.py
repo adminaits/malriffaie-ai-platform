@@ -5,6 +5,11 @@ from datetime import date
 
 settings = get_settings()
 
+PRIVATE_KNOWLEDGE_MESSAGE = (
+    "Please login, contact info@malriffaie.com, book a consultation, "
+    "or call us for more details."
+)
+
 DEFAULT_PROMPT = """
 You are the customer support and e-commerce AI concierge for {site}.
 
@@ -86,23 +91,38 @@ def _clean_model_name(value, fallback="HuggingFaceH4/zephyr-7b-beta"):
     return value
 
 
-def _keyword_score(text: str, query: str) -> int:
-    text = (text or "").lower()
-    query = (query or "").lower()
+def _query_words(query: str) -> list[str]:
+    cleaned = (
+        (query or "")
+        .replace("?", " ")
+        .replace(".", " ")
+        .replace(",", " ")
+        .replace(":", " ")
+        .replace(";", " ")
+        .replace("/", " ")
+        .replace("-", " ")
+        .replace("_", " ")
+    )
 
     stop_words = {
         "what", "about", "tell", "know", "please", "can", "you", "the",
         "is", "are", "for", "with", "from", "that", "this", "have", "has",
         "who", "how", "why", "when", "where", "and", "or", "to", "of",
+        "me", "my", "your", "our", "more", "details", "detail",
     }
 
     words = [
-        word.strip(".,?!:;()[]{}\"'")
-        for word in query.split()
+        word.strip(".,?!:;()[]{}\"'").lower()
+        for word in cleaned.split()
         if len(word.strip(".,?!:;()[]{}\"'")) > 2
     ]
 
-    words = [word for word in words if word not in stop_words]
+    return [word for word in words if word and word not in stop_words]
+
+
+def _keyword_score(text: str, query: str) -> int:
+    text = (text or "").lower()
+    words = _query_words(query)
 
     score = 0
 
@@ -113,53 +133,137 @@ def _keyword_score(text: str, query: str) -> int:
     return score
 
 
-def retrieve_context(query: str, limit: int = 8) -> dict:
-    query_text = (query or "").strip()
+def _row_access_level(row: dict) -> str:
+    access_level = row.get("access_level") or "public"
 
+    if isinstance(access_level, str):
+        access_level = access_level.strip().lower()
+    else:
+        access_level = "public"
+
+    if access_level not in {"public", "private"}:
+        access_level = "public"
+
+    if row.get("internal_company_wiki") is True:
+        access_level = "private"
+
+    metadata = row.get("metadata") or {}
+
+    if isinstance(metadata, dict):
+        if metadata.get("internal_company_wiki") is True:
+            access_level = "private"
+
+        meta_access = metadata.get("access_level")
+        if isinstance(meta_access, str) and meta_access.strip().lower() == "private":
+            access_level = "private"
+
+    return access_level
+
+
+def _is_private_row(row: dict) -> bool:
+    return _row_access_level(row) == "private"
+
+
+def _score_knowledge_row(item: dict, query_text: str) -> int:
+    content = item.get("content") or ""
+    metadata = item.get("metadata") or {}
+
+    score = _keyword_score(content, query_text)
+    score += _keyword_score(str(metadata), query_text)
+
+    low_query = query_text.lower()
+    low_content = content.lower()
+    low_metadata = str(metadata).lower()
+
+    combined = f"{low_content} {low_metadata}"
+
+    if "malriffaie" in low_query and "malriffaie" in combined:
+        score += 5
+
+    if "alriffaie" in low_query and "alriffaie" in combined:
+        score += 5
+
+    if "mohamed" in low_query and "mohamed" in combined:
+        score += 5
+
+    if "enchantment" in low_query and "enchantment" in combined:
+        score += 5
+
+    if "management" in low_query and "management" in combined:
+        score += 3
+
+    if "internal" in low_query and item.get("internal_company_wiki"):
+        score += 5
+
+    if "company" in low_query and item.get("internal_company_wiki"):
+        score += 3
+
+    if "wiki" in low_query and item.get("internal_company_wiki"):
+        score += 5
+
+    if "about" in low_query and (
+        "about malriffaie" in combined
+        or "about enchantment" in combined
+        or "about mohamed" in combined
+    ):
+        score += 5
+
+    return score
+
+
+def _load_knowledge_rows() -> list[dict]:
+    """
+    Loads recent/approved knowledge rows. This keeps your existing simple Supabase
+    retrieval approach, while adding access_level/internal_company_wiki fields.
+    """
     try:
-        all_kb = (
+        return (
             supabase
             .table("knowledge_base")
-            .select("id,source_type,source_id,content,metadata")
-            .limit(200)
+            .select("id,source_type,source_id,content,metadata,access_level,internal_company_wiki")
+            .limit(300)
             .execute()
             .data
             or []
         )
+    except Exception:
+        return []
 
+
+def _private_knowledge_match_exists(query: str) -> bool:
+    query_text = (query or "").strip()
+
+    if not query_text:
+        return False
+
+    all_kb = _load_knowledge_rows()
+
+    for item in all_kb:
+        if not _is_private_row(item):
+            continue
+
+        if _score_knowledge_row(item, query_text) > 0:
+            return True
+
+    return False
+
+
+def retrieve_context(
+    query: str,
+    limit: int = 8,
+    include_private: bool = False,
+) -> dict:
+    query_text = (query or "").strip()
+
+    try:
+        all_kb = _load_knowledge_rows()
         scored_kb = []
 
         for item in all_kb:
-            content = item.get("content") or ""
-            metadata = item.get("metadata") or {}
+            if _is_private_row(item) and not include_private:
+                continue
 
-            score = _keyword_score(content, query_text)
-            score += _keyword_score(str(metadata), query_text)
-
-            low_query = query_text.lower()
-            low_content = content.lower()
-
-            if "malriffaie" in low_query and "malriffaie" in low_content:
-                score += 5
-
-            if "alriffaie" in low_query and "alriffaie" in low_content:
-                score += 5
-
-            if "mohamed" in low_query and "mohamed" in low_content:
-                score += 5
-
-            if "enchantment" in low_query and "enchantment" in low_content:
-                score += 5
-
-            if "management" in low_query and "management" in low_content:
-                score += 3
-
-            if "about" in low_query and (
-                "about malriffaie" in low_content
-                or "about enchantment" in low_content
-                or "about mohamed" in low_content
-            ):
-                score += 5
+            score = _score_knowledge_row(item, query_text)
 
             if score > 0:
                 scored_kb.append((score, item))
@@ -168,9 +272,14 @@ def retrieve_context(query: str, limit: int = 8) -> dict:
         kb = [item for _, item in scored_kb[:limit]]
 
         # Important fallback:
-        # If no keyword match, still provide some approved knowledge base context.
+        # If no keyword match, still provide approved context.
+        # Public users only get public context.
         if not kb:
-            kb = all_kb[:limit]
+            fallback_rows = [
+                item for item in all_kb
+                if include_private or not _is_private_row(item)
+            ]
+            kb = fallback_rows[:limit]
 
     except Exception:
         kb = []
@@ -332,7 +441,7 @@ def _product_list_answer(products: list[dict]) -> str:
 
     for idx, product in enumerate(products, 1):
         lines.append(
-            f"{idx}. {product.get('name')} — "
+            f"{idx}. {product.get('name')} - "
             f"{_format_price(product.get('price'), product.get('currency'))}"
         )
 
@@ -353,7 +462,7 @@ def _service_list_answer(services: list[dict]) -> str:
 
     for idx, service in enumerate(services, 1):
         lines.append(
-            f"{idx}. {service.get('name')} — "
+            f"{idx}. {service.get('name')} - "
             f"{_format_price(service.get('price'), service.get('currency'))}"
         )
 
@@ -394,7 +503,7 @@ def _recommendation_answer(message: str, products: list[dict], services: list[di
 
     for idx, product in enumerate(recommended, 1):
         lines.append(
-            f"{idx}. {product.get('name')} — "
+            f"{idx}. {product.get('name')} - "
             f"{_format_price(product.get('price'), product.get('currency'))}"
         )
         if product.get("description"):
@@ -480,9 +589,21 @@ async def answer_chat(
     visitor_id: str | None = None,
     lang: str = "en",
     ip_hash: str | None = None,
+    client_logged_in: bool = False,
 ) -> dict:
     cfg = _latest_ai_settings()
-    ctx = retrieve_context(message)
+
+    if not client_logged_in and _private_knowledge_match_exists(message):
+        return {
+            "answer": PRIVATE_KNOWLEDGE_MESSAGE,
+            "products": [],
+            "sources": [],
+        }
+
+    ctx = retrieve_context(
+        message,
+        include_private=client_logged_in,
+    )
 
     recommended = recommend_products(message, ctx["products"])
     answer = None
