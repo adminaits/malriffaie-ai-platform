@@ -62,12 +62,16 @@ function isAdminRoute(path) {
     path.startsWith('/api/admin') ||
     path.startsWith('/api/integrations') ||
     path.startsWith('/api/auth/me') ||
-    path.startsWith('/api/auth/change-password')
+    path.startsWith('/api/auth/change-password') ||
+    path.startsWith('/api/chat/admin')
   );
 }
 
 function isClientRoute(path) {
-  return path.startsWith('/api/auth/client/');
+  return (
+    path.startsWith('/api/auth/client/') ||
+    path.startsWith('/api/chat/client')
+  );
 }
 
 async function parseErrorResponse(res) {
@@ -173,11 +177,29 @@ export const getServices = () =>
 export const getChatSettings = () =>
   api('/api/settings/chat');
 
-export const sendChat = (payload) =>
-  api('/api/chat', {
+export const sendChat = (payload) => {
+  const adminToken = getAdminToken();
+  const clientToken = getClientToken();
+
+  if (adminToken) {
+    return api('/api/chat/admin', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  if (clientToken) {
+    return api('/api/chat/client', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  return api('/api/chat', {
     method: 'POST',
     body: JSON.stringify(payload),
   });
+};
 
 // Admin CRUD
 export const adminList = (table) =>
