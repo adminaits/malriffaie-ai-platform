@@ -5,10 +5,24 @@ from datetime import date
 
 settings = get_settings()
 
-PRIVATE_KNOWLEDGE_MESSAGE = (
-    "Please login, contact info@malriffaie.com, book a consultation, "
-    "or call us for more details."
-)
+PRIVATE_KNOWLEDGE_MESSAGE = """
+## Thank You for Your Interest
+
+We appreciate you taking the time to learn more about **Mal Riffaie**. The information you’ve reviewed is just the beginning of how we can support your goals.
+
+To explore tailored solutions for your business or project, we invite you to:
+
+- **Log in** to your client portal if you already have an account
+- **Subscribe** to stay updated with our latest insights, offers, and service announcements
+
+For personalized guidance, you can also:
+
+- **Email us:** info@malriffaie.com
+- **Book a consultation** to discuss your needs in detail
+- **Call us** for immediate assistance and quick answers
+
+Our team is ready to help you move forward with clarity and confidence.
+""".strip()
 
 DEFAULT_PROMPT = """
 You are the customer support and e-commerce AI concierge for {site}.
