@@ -125,7 +125,14 @@ const defaults = {
   chat_settings: { brand_title:'Malriffaie', brand_subtitle:'AI Concierge', hero_title:'How can we help you today?', show_tagline:true, input_placeholder:'Describe what you need...', empty_state_title:'Ask about products, services, or bookings', empty_state_message:'I can recommend the right product or help you book a consultation.', show_chips:true, show_sources:false, sticky_input:true, auto_focus:true, show_sidebar:true, show_services_sidebar:true, show_products_sidebar:true, footer_disclaimer:'AI responses may need human confirmation for complex cases.' },
   products: { name:'', description:'', price:'', currency:'BHD', image_url:'', available:true },
   services: { name:'', description:'', price:'', currency:'BHD', available:true },
-  knowledge_base: { source_type:'manual', source_id:'', content:'', metadata:{} },
+  knowledge_base: {
+    source_type: 'manual',
+    source_id: '',
+    content: '',
+    metadata: {},
+    access_level: 'public',
+    internal_company_wiki: false
+  },
   google_drive_widgets: {
     api_key: '',
     folder_id: '',
@@ -134,6 +141,8 @@ const defaults = {
     selected_folder_id: '',
     selected_folder_ids: [],
     include_subfolders: true,
+    internal_company_wiki: false,
+    access_level: 'public',
     allowed_mime_types: [
       'application/pdf',
       'application/vnd.google-apps.document',
@@ -231,6 +240,9 @@ function cleanPayload(table, form) {
       payload.selected_folder_ids = [];
     }
 
+    payload.internal_company_wiki = !!payload.internal_company_wiki;
+    payload.access_level = payload.internal_company_wiki ? 'private' : 'public';
+
     payload.include_subfolders = !!payload.include_subfolders;
     payload.enabled = !!payload.enabled;
 
@@ -240,6 +252,18 @@ function cleanPayload(table, form) {
       payload.sync_interval_minutes !== undefined
     ) {
       payload.sync_interval_minutes = Number(payload.sync_interval_minutes);
+    }
+  }
+
+  if (table === 'knowledge_base') {
+    payload.internal_company_wiki = !!payload.internal_company_wiki;
+
+    if (!payload.access_level || !['public', 'private'].includes(payload.access_level)) {
+      payload.access_level = payload.internal_company_wiki ? 'private' : 'public';
+    }
+
+    if (payload.access_level === 'private') {
+      payload.internal_company_wiki = true;
     }
   }
 
@@ -514,6 +538,36 @@ function DriveForm({ form, setForm }) {
       </Field>
 
       <Field
+        label="Internal company wikis"
+        help="Enable this if this Google Drive knowledge is private and should only be available to logged-in clients or admins."
+      >
+        <Check
+          label={form.internal_company_wiki ? 'Private/internal knowledge enabled' : 'Public knowledge'}
+          checked={!!form.internal_company_wiki}
+          onChange={v => {
+            set('internal_company_wiki', v);
+            set('access_level', v ? 'private' : 'public');
+          }}
+        />
+      </Field>
+
+      <Field
+        label="Knowledge visibility"
+        help="Public knowledge can be used by all visitors. Private knowledge is only available to logged-in clients/admins."
+      >
+        <Select
+          value={form.internal_company_wiki ? 'private' : (form.access_level || 'public')}
+          onChange={v => {
+            set('access_level', v);
+            set('internal_company_wiki', v === 'private');
+          }}
+        >
+          <option value="public">Public knowledge</option>
+          <option value="private">Private knowledge - logged-in clients/admins only</option>
+        </Select>
+      </Field>
+
+      <Field
         label="Allowed file types"
         help="JSON list of allowed MIME types."
       >
@@ -679,7 +733,58 @@ function PaymentSettingsForm({ form, setForm }) {
 }
 function EmailSettingsForm({ form, setForm }) { const set=(k,v)=>setForm(f=>({ ...f, [k]:v })); return <div className="settingsForm"><Field label="Admin notification email"><Text type="email" value={form.admin_email || ''} onChange={v=>set('admin_email', v)} /></Field><Field label="Confirmation subject"><Text value={form.confirmation_subject || ''} onChange={v=>set('confirmation_subject', v)} /></Field><Field label="Confirmation email body"><Textarea rows={4} value={form.confirmation_body || ''} onChange={v=>set('confirmation_body', v)} /></Field><Field label="Reminder email body"><Textarea rows={4} value={form.reminder_body || ''} onChange={v=>set('reminder_body', v)} /></Field></div>; }
 function LeadForm({ form, setForm }) { const set=(k,v)=>setForm(f=>({ ...f, [k]:v })); return <div className="settingsForm"><Field label="Name"><Text value={form.name || ''} onChange={v=>set('name', v)} /></Field><Field label="Email"><Text type="email" value={form.email || ''} onChange={v=>set('email', v)} /></Field><Field label="Product ID"><Text value={form.product_id || ''} onChange={v=>set('product_id', v)} /></Field><Field label="Status"><Select value={form.status} onChange={v=>set('status', v)}><option>new</option><option>registered</option><option>contacted</option><option>paid</option><option>closed</option></Select></Field><Field label="Paid"><Check checked={form.paid} onChange={v=>set('paid', v)} /></Field></div>; }
-function KnowledgeForm({ form, setForm }) { const set=(k,v)=>setForm(f=>({ ...f, [k]:v })); return <div className="settingsForm"><Field label="Source type"><Select value={form.source_type} onChange={v=>set('source_type', v)}><option>manual</option><option>google_drive</option><option>product</option><option>service</option></Select></Field><Field label="Source ID"><Text value={form.source_id || ''} onChange={v=>set('source_id', v)} /></Field><Field label="Approved knowledge content"><Textarea rows={8} value={form.content || ''} onChange={v=>set('content', v)} /></Field></div>; }
+function KnowledgeForm({ form, setForm }) {
+  const set=(k,v)=>setForm(f=>({ ...f, [k]:v }));
+
+  return <div className="settingsForm">
+    <Field label="Source type">
+      <Select value={form.source_type} onChange={v=>set('source_type', v)}>
+        <option>manual</option>
+        <option>google_drive</option>
+        <option>product</option>
+        <option>service</option>
+      </Select>
+    </Field>
+
+    <Field label="Source ID">
+      <Text value={form.source_id || ''} onChange={v=>set('source_id', v)} />
+    </Field>
+
+    <Field
+      label="Internal company wikis"
+      help="Enable this if this knowledge should only be available to logged-in clients or admins."
+    >
+      <Check
+        label={form.internal_company_wiki ? 'Private/internal knowledge enabled' : 'Public knowledge'}
+        checked={!!form.internal_company_wiki}
+        onChange={v => {
+          set('internal_company_wiki', v);
+          set('access_level', v ? 'private' : 'public');
+        }}
+      />
+    </Field>
+
+    <Field
+      label="Knowledge visibility"
+      help="Public knowledge can be used by all visitors. Private knowledge is only available to logged-in clients/admins."
+    >
+      <Select
+        value={form.internal_company_wiki ? 'private' : (form.access_level || 'public')}
+        onChange={v => {
+          set('access_level', v);
+          set('internal_company_wiki', v === 'private');
+        }}
+      >
+        <option value="public">Public knowledge</option>
+        <option value="private">Private knowledge - logged-in clients/admins only</option>
+      </Select>
+    </Field>
+
+    <Field label="Approved knowledge content">
+      <Textarea rows={8} value={form.content || ''} onChange={v=>set('content', v)} />
+    </Field>
+  </div>;
+}
 function GenericJsonForm({ form, setForm }) { return <div className="settingsForm"><Field label="JSON row"><Textarea rows={8} value={JSON.stringify(form, null, 2)} onChange={v=>{ try { setForm(JSON.parse(v)); } catch {} }} /></Field></div>; }
 
 function FormFor({ table, form, setForm }) {
@@ -856,6 +961,7 @@ function AdminPage() {
         `Files synced: ${res.synced_files ?? 0}`,
         `Chunks created: ${res.total_chunks ?? 0}`,
         `Skipped: ${res.skipped_files ?? 0}`,
+        `Visibility: ${res.internal_company_wiki ? 'private/internal' : (res.access_level || 'public')}`,
       ].join(' | ');
 
       const message = res.message || 'Sync completed.';
