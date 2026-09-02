@@ -31,6 +31,25 @@ def _clean_value(value):
     return value
 
 
+def _normalise_access_level(value, internal_company_wiki: bool = False) -> str:
+    """
+    Public knowledge can be used by all visitors.
+    Private knowledge is only for logged-in clients/admins.
+
+    If Internal Company Wiki is enabled, always force private.
+    """
+    if internal_company_wiki:
+        return "private"
+
+    value = _clean_value(value) or "public"
+    value = value.lower()
+
+    if value not in {"public", "private"}:
+        return "public"
+
+    return value
+
+
 def extract_folder_id(folder_url_or_id: str | None) -> str:
     value = _clean_value(folder_url_or_id)
 
@@ -460,11 +479,19 @@ async def delete_existing_knowledge_for_file(source_id: str) -> None:
     )
 
 
-async def insert_knowledge_chunks_from_drive_file(file: dict, content: str) -> int:
+async def insert_knowledge_chunks_from_drive_file(
+    file: dict,
+    content: str,
+    access_level: str = "public",
+    internal_company_wiki: bool = False,
+) -> int:
     source_id = file.get("id")
 
     if not source_id or not content:
         return 0
+
+    internal_company_wiki = bool(internal_company_wiki)
+    access_level = _normalise_access_level(access_level, internal_company_wiki)
 
     await delete_existing_knowledge_for_file(source_id)
 
@@ -476,6 +503,8 @@ async def insert_knowledge_chunks_from_drive_file(file: dict, content: str) -> i
             "source_type": "google_drive",
             "source_id": source_id,
             "content": chunk,
+            "access_level": access_level,
+            "internal_company_wiki": internal_company_wiki,
             "metadata": {
                 "name": file.get("name"),
                 "mimeType": file.get("mimeType"),
@@ -484,6 +513,8 @@ async def insert_knowledge_chunks_from_drive_file(file: dict, content: str) -> i
                 "parents": file.get("parents"),
                 "chunk_index": idx,
                 "total_chunks": len(chunks),
+                "access_level": access_level,
+                "internal_company_wiki": internal_company_wiki,
             },
         }
 
@@ -514,12 +545,17 @@ async def sync_google_drive_widget(widget: dict) -> dict:
     include_subfolders = _bool_value(widget.get("include_subfolders"), default=True)
     allowed_mime_types = _parse_allowed_mime_types(widget.get("allowed_mime_types"))
 
+    internal_company_wiki = _bool_value(widget.get("internal_company_wiki"), default=False)
+    access_level = _normalise_access_level(widget.get("access_level"), internal_company_wiki)
+
     if not api_key:
         return {
             "ok": False,
             "message": "Google Drive API key is missing.",
             "folder_ids_used": folder_ids,
             "synced_files": 0,
+            "access_level": access_level,
+            "internal_company_wiki": internal_company_wiki,
         }
 
     if not folder_ids:
@@ -528,6 +564,8 @@ async def sync_google_drive_widget(widget: dict) -> dict:
             "message": "Google Drive folder ID is missing.",
             "folder_ids_used": [],
             "synced_files": 0,
+            "access_level": access_level,
+            "internal_company_wiki": internal_company_wiki,
         }
 
     try:
@@ -554,6 +592,8 @@ async def sync_google_drive_widget(widget: dict) -> dict:
             "folder_ids_used": folder_ids,
             "synced_files": 0,
             "total_files_found": 0,
+            "access_level": access_level,
+            "internal_company_wiki": internal_company_wiki,
         }
 
     synced_files = 0
@@ -590,7 +630,12 @@ async def sync_google_drive_widget(widget: dict) -> dict:
             })
             continue
 
-        chunks_inserted = await insert_knowledge_chunks_from_drive_file(file, content)
+        chunks_inserted = await insert_knowledge_chunks_from_drive_file(
+            file,
+            content,
+            access_level=access_level,
+            internal_company_wiki=internal_company_wiki,
+        )
 
         if chunks_inserted > 0:
             synced_files += 1
@@ -618,5 +663,7 @@ async def sync_google_drive_widget(widget: dict) -> dict:
         "total_chunks": total_chunks,
         "include_subfolders": include_subfolders,
         "allowed_mime_types": allowed_mime_types,
+        "access_level": access_level,
+        "internal_company_wiki": internal_company_wiki,
         "skipped_details": skipped_details,
     }
