@@ -289,15 +289,12 @@ def retrieve_context(
         scored_kb.sort(key=lambda x: x[0], reverse=True)
         kb = [item for _, item in scored_kb[:limit]]
 
-        # Important fallback:
-        # If no keyword match, still provide approved context.
-        # Public users only get public context.
+        # Important:
+        # Do not return random knowledge rows when there is no match.
+        # This prevents unrelated Google Drive content from appearing
+        # for public product/service/booking questions.
         if not kb:
-            fallback_rows = [
-                item for item in all_kb
-                if include_private or not _is_private_row(item)
-            ]
-            kb = fallback_rows[:limit]
+            kb = []
 
     except Exception:
         kb = []
@@ -699,6 +696,7 @@ async def answer_chat(
 
     recommended = recommend_products(message, ctx["products"])
     answer = None
+    used_knowledge = False
 
     # 1. Public product list questions must always be allowed.
     if _wants_product_list(message):
@@ -747,6 +745,9 @@ async def answer_chat(
             )
 
     # 6. Only block private/internal knowledge questions after public answers fail.
+    # This preserves the main idea:
+    # - end users can access public products/services/booking/public knowledge
+    # - private/internal Google Drive wiki requires client/admin login
     if (
         answer is None
         and not client_logged_in
@@ -761,6 +762,8 @@ async def answer_chat(
 
     # 7. If no deterministic public answer, use AI with allowed context.
     if answer is None:
+        used_knowledge = bool(ctx["knowledge"])
+
         prompt_template = cfg.get("system_prompt") or DEFAULT_PROMPT
 
         prompt = prompt_template.format(
@@ -820,8 +823,10 @@ async def answer_chat(
             if ctx["knowledge"]:
                 first_context = ctx["knowledge"][0].get("content", "").strip()
                 answer = first_context[:900] if first_context else None
+                used_knowledge = True
 
             if not answer:
+                used_knowledge = False
                 answer = (
                     cfg.get("fallback_message")
                     or "I do not have that information yet. I can arrange a human handoff for you."
@@ -844,5 +849,5 @@ async def answer_chat(
     return {
         "answer": answer,
         "products": recommended,
-        "sources": ctx["knowledge"],
+        "sources": ctx["knowledge"] if used_knowledge else [],
     }
