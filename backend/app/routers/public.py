@@ -9,6 +9,31 @@ import hashlib
 router = APIRouter(prefix="/api", tags=["public"])
 
 
+def _get_client_data(client):
+    """
+    Some auth functions return the client directly:
+    {"id": "...", "email": "..."}
+
+    Others may return:
+    {"client": {"id": "...", "email": "..."}}
+
+    This helper supports both safely.
+    """
+    if isinstance(client, dict) and client.get("client"):
+        return client.get("client")
+
+    return client
+
+
+def _get_client_id(client):
+    client_data = _get_client_data(client)
+
+    if isinstance(client_data, dict):
+        return client_data.get("id") or client_data.get("client_id") or client_data.get("email")
+
+    return None
+
+
 @router.get("/health")
 def health():
     return {"ok": True}
@@ -107,9 +132,16 @@ async def client_chat(
         ip = request.client.host if request.client else "unknown"
         ip_hash = hashlib.sha256(ip.encode()).hexdigest()
 
+        client_id = _get_client_id(client)
+
+        visitor_id = payload.visitor_id
+
+        if client_id:
+            visitor_id = f"client:{client_id}"
+
         return await answer_chat(
             payload.message,
-            visitor_id=payload.visitor_id,
+            visitor_id=visitor_id,
             lang=payload.lang,
             ip_hash=ip_hash,
             client_logged_in=True,
@@ -121,6 +153,38 @@ async def client_chat(
             "products": [],
             "sources": [],
         }
+
+
+@router.get("/chat/client/history")
+def client_chat_history(client=Depends(get_current_client)):
+    """
+    Logged-in client chat history endpoint.
+
+    This returns the last 100 chat messages saved for this client.
+    The frontend uses this to show previous chat history in the client dashboard sidebar.
+    """
+    try:
+        client_id = _get_client_id(client)
+
+        if not client_id:
+            return []
+
+        rows = (
+            supabase
+            .table("chat_messages")
+            .select("*")
+            .eq("visitor_id", f"client:{client_id}")
+            .order("created_at", desc=False)
+            .limit(100)
+            .execute()
+            .data
+            or []
+        )
+
+        return rows
+
+    except Exception:
+        return []
 
 
 @router.post("/chat/admin", response_model=ChatResponse)
