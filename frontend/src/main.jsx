@@ -89,30 +89,196 @@ function ProductCard({ product }) {
 
 function ChatPage() {
   const visitorId = useVisitorId();
-  const [products, setProducts] = useState([]); const [services, setServices] = useState([]); const [settings, setSettings] = useState({});
-  const [messages, setMessages] = useState([]); const [input, setInput] = useState(''); const [loading, setLoading] = useState(false);
-  useEffect(() => { getProducts().then(setProducts); getServices().then(setServices); getChatSettings().then(setSettings).catch(()=>{}); }, []);
-  function pick(text) { setInput(text); setTimeout(()=>document.querySelector('#chatInput')?.focus(), 10); }
-  function newChat() { setMessages([]); setInput(''); setTimeout(()=>document.querySelector('#chatInput')?.focus(), 10); }
-  async function submit(e) {
-    e.preventDefault(); const text = input.trim(); if (!text || loading) return;
-    setInput(''); setMessages(m => [...m, { role:'user', text }]); setLoading(true);
-    try { const res = await sendChat({ message: text, visitor_id: visitorId, lang: navigator.language || 'en' }); setMessages(m => [...m, { role:'assistant', text: res.answer, products: res.products || [], sources: res.sources || [] }]); }
-    catch { setMessages(m => [...m, { role:'assistant', text:'Sorry, the chat service is unavailable. Please contact info6@malriffaie.com.' }]); }
-    finally { setLoading(false); }
+  const [products, setProducts] = useState([]);
+  const [services, setServices] = useState([]);
+  const [settings, setSettings] = useState({});
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [clientLoggedIn, setClientLoggedIn] = useState(false);
+
+  useEffect(() => {
+    getProducts().then(setProducts);
+    getServices().then(setServices);
+    getChatSettings().then(setSettings).catch(() => {});
+
+    clientMe()
+      .then(() => setClientLoggedIn(true))
+      .catch(() => setClientLoggedIn(false));
+  }, []);
+
+  function pick(text) {
+    setInput(text);
+    setTimeout(() => document.querySelector('#chatInput')?.focus(), 10);
   }
-  return <div className="appShell chatEnabledHome">
-    {(settings.show_sidebar ?? true) && <Sidebar products={products} services={services} settings={settings} onPick={pick} onNewChat={newChat}/>}<main className="chatMain">
-      <header className="hero compactHero"><div><h1>{settings.hero_title || 'How can we help you today?'}</h1>{(settings.show_tagline ?? true) && <p>Ask about products, services, pricing, FAQs, or booking.</p>}</div><div className="homeHeaderActions"><a className="adminLink" href="/client-register"><UserPlus size={16}/> Client Registration</a><a className="adminLink" href="/client-login"><UserRound size={16}/> Client Login</a><a className="adminLink" href="/admin"><Settings size={16}/> Admin</a></div></header>
-      <section className="messages">
-        {!messages.length && <div className="empty"><h3>{settings.empty_state_title || 'Start a conversation'}</h3><p>{settings.empty_state_message || 'I can recommend products, explain services, answer FAQs, and help with bookings.'}</p>{(settings.show_chips ?? true) && <div className="chips"><button onClick={()=>pick('Which product is right for a new business?')}>Recommend a product</button><button onClick={()=>pick('I want to book an online consultation')}>Book consultation</button><button onClick={()=>pick('Tell me about partnership agreements')}>Partnership agreement</button></div>}</div>}
-        {messages.map((m,i)=><div key={i} className={`msg ${m.role}`}><p>{m.text}</p>{m.products?.length>0 && <div className="cards">{m.products.map(p=><ProductCard key={p.id} product={p}/>)}</div>}{settings.show_sources && m.sources?.length>0 && <details><summary>Sources</summary><pre>{JSON.stringify(m.sources, null, 2)}</pre></details>}</div>)}
-        {loading && <div className="msg assistant"><p>Thinking...</p></div>}
-      </section>
-      <form className="composer" onSubmit={submit}><input id="chatInput" autoFocus={settings.auto_focus ?? true} value={input} onChange={e=>setInput(e.target.value)} placeholder={settings.input_placeholder || 'Describe what you need...'}/><button><Send size={18}/></button></form>
-      <footer>{settings.footer_disclaimer || 'AI responses may need human confirmation for complex cases.'}</footer>
-    </main></div>;
+
+  function newChat() {
+    setMessages([]);
+    setInput('');
+    setTimeout(() => document.querySelector('#chatInput')?.focus(), 10);
+  }
+
+  function clientLogoutFromHome() {
+    logoutClient();
+    setClientLoggedIn(false);
+    setMessages([]);
+  }
+
+  async function submit(e) {
+    e.preventDefault();
+
+    const text = input.trim();
+
+    if (!text || loading) return;
+
+    setInput('');
+    setMessages(m => [...m, { role: 'user', text }]);
+    setLoading(true);
+
+    try {
+      const res = await sendChat({
+        message: text,
+        visitor_id: visitorId,
+        lang: navigator.language || 'en'
+      });
+
+      setMessages(m => [
+        ...m,
+        {
+          role: 'assistant',
+          text: res.answer,
+          products: res.products || [],
+          sources: res.sources || []
+        }
+      ]);
+    } catch {
+      setMessages(m => [
+        ...m,
+        {
+          role: 'assistant',
+          text: 'Sorry, the chat service is unavailable. Please contact info6@malriffaie.com.'
+        }
+      ]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="appShell chatEnabledHome">
+      {(settings.show_sidebar ?? true) && (
+        <Sidebar
+          products={products}
+          services={services}
+          settings={settings}
+          onPick={pick}
+          onNewChat={newChat}
+        />
+      )}
+
+      <main className="chatMain">
+        <header className="hero compactHero">
+          <div>
+            <h1>{settings.hero_title || 'How can we help you today?'}</h1>
+            {(settings.show_tagline ?? true) && (
+              <p>Ask about products, services, pricing, FAQs, or booking.</p>
+            )}
+          </div>
+
+          <div className="homeHeaderActions">
+            {clientLoggedIn ? (
+              <>
+                <a className="adminLink" href="/client-dashboard">
+                  <UserRound size={16} /> Client Dashboard
+                </a>
+
+                <button
+                  type="button"
+                  className="adminLink"
+                  onClick={clientLogoutFromHome}
+                >
+                  <LogOut size={16} /> Client Logout
+                </button>
+              </>
+            ) : (
+              <>
+                <a className="adminLink" href="/client-register">
+                  <UserPlus size={16} /> Client Registration
+                </a>
+
+                <a className="adminLink" href="/client-login">
+                  <UserRound size={16} /> Client Login
+                </a>
+              </>
+            )}
+
+            <a className="adminLink" href="/admin">
+              <Settings size={16} /> Admin
+            </a>
+          </div>
+        </header>
+
+        <section className="messages">
+          {!messages.length && (
+            <div className="empty">
+              <h3>{settings.empty_state_title || 'Start a conversation'}</h3>
+              <p>{settings.empty_state_message || 'I can recommend products, explain services, answer FAQs, and help with bookings.'}</p>
+
+              {(settings.show_chips ?? true) && (
+                <div className="chips">
+                  <button onClick={() => pick('Which product is right for a new business?')}>Recommend a product</button>
+                  <button onClick={() => pick('I want to book an online consultation')}>Book consultation</button>
+                  <button onClick={() => pick('Tell me about partnership agreements')}>Partnership agreement</button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {messages.map((m, i) => (
+            <div key={i} className={`msg ${m.role}`}>
+              <p>{m.text}</p>
+
+              {m.products?.length > 0 && (
+                <div className="cards">
+                  {m.products.map(p => <ProductCard key={p.id} product={p} />)}
+                </div>
+              )}
+
+              {settings.show_sources && m.sources?.length > 0 && (
+                <details>
+                  <summary>Sources</summary>
+                  <pre>{JSON.stringify(m.sources, null, 2)}</pre>
+                </details>
+              )}
+            </div>
+          ))}
+
+          {loading && (
+            <div className="msg assistant">
+              <p>Thinking...</p>
+            </div>
+          )}
+        </section>
+
+        <form className="composer" onSubmit={submit}>
+          <input
+            id="chatInput"
+            autoFocus={settings.auto_focus ?? true}
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            placeholder={settings.input_placeholder || 'Describe what you need...'}
+          />
+          <button>
+            <Send size={18} />
+          </button>
+        </form>
+
+        <footer>{settings.footer_disclaimer || 'AI responses may need human confirmation for complex cases.'}</footer>
+      </main>
+    </div>
+  );
 }
+
 
 const tabs = [
   ['ai_settings','AI Concierge Settings'], ['chat_settings','Chat Page Settings'], ['services','Services'], ['products','E-commerce Products'],
