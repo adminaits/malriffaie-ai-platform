@@ -178,17 +178,20 @@ export const getChatSettings = () =>
   api('/api/settings/chat');
 
 export const sendChat = (payload) => {
+  const isAdminPage = window.location.pathname.startsWith('/admin');
+  const isClientPage = window.location.pathname.startsWith('/client-dashboard');
+
   const adminToken = getAdminToken();
   const clientToken = getClientToken();
 
-  if (adminToken) {
+  if (isAdminPage && adminToken) {
     return api('/api/chat/admin', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
   }
 
-  if (clientToken) {
+  if (isClientPage && clientToken) {
     return api('/api/chat/client', {
       method: 'POST',
       body: JSON.stringify(payload),
@@ -266,6 +269,11 @@ export const loginClient = (payload) =>
 
 export const clientMe = () =>
   api('/api/auth/client/me');
+
+export const getClientChatHistory = () =>
+  api('/api/chat/client/history', {
+    method: 'GET',
+  });
 
 export const changeClientPassword = (payload) =>
   api('/api/auth/client/change-password', {
