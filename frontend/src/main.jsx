@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Send, ShoppingCart, Settings, Save, Trash2, Pencil, Plus, TestTube, RefreshCw, Download, Lock, LogOut, KeyRound, UserPlus, UserRound, Loader2 } from 'lucide-react';
-import { getProducts, getServices, getChatSettings, sendChat, adminList, adminCreate, adminUpdate, adminDelete, testHuggingFace, syncDriveWidget, listDriveFolders, exportLeadsCsv, loginAdmin, adminMe, changeAdminPassword, logoutAdmin, setAdminToken, registerClient, loginClient, clientMe, logoutClient, setClientToken } from './lib/api';
+import { getProducts, getServices, getChatSettings, sendChat, adminList, adminCreate, adminUpdate, adminDelete, testHuggingFace, syncDriveWidget, listDriveFolders, exportLeadsCsv, loginAdmin, adminMe, changeAdminPassword, logoutAdmin, setAdminToken, registerClient, loginClient, clientMe, getClientChatHistory, logoutClient, setClientToken } from './lib/api';
 import './styles.css';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || '';
@@ -1004,6 +1004,7 @@ function ClientAuthPage({ mode='login' }) {
 function ClientDashboard() {
   const [client, setClient] = useState(null);
   const [authChecked, setAuthChecked] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [products, setProducts] = useState([]);
   const [services, setServices] = useState([]);
   const [settings, setSettings] = useState({});
@@ -1011,29 +1012,290 @@ function ClientDashboard() {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const visitorId = useVisitorId();
-  useEffect(() => {
-    clientMe().then(c => { setClient(c); setAuthChecked(true); }).catch(() => { setAuthChecked(true); location.href = '/client-login'; });
-    getProducts().then(setProducts); getServices().then(setServices); getChatSettings().then(setSettings).catch(()=>{});
-  }, []);
-  function logout() { logoutClient(); location.href = '/client-login'; }
-  async function submit(e) {
-    e.preventDefault(); const text = input.trim(); if (!text || loading) return;
-    setInput(''); setMessages(m => [...m, { role:'user', text }]); setLoading(true);
-    try {
-      const res = await sendChat({ message: text, visitor_id: `client:${client?.id || visitorId}`, lang: navigator.language || 'en' });
-      setMessages(m => [...m, { role:'assistant', text: res.answer, products: res.products || [], sources: res.sources || [] }]);
-    } catch { setMessages(m => [...m, { role:'assistant', text:'Sorry, the chat service is unavailable. Please contact info6@malriffaie.com.' }]); }
-    finally { setLoading(false); }
+
+  function getClientKey(clientData) {
+    return clientData?.id || clientData?.email || 'unknown';
   }
-  if (!authChecked) return <div className="loginShell"><div className="loginCard"><p>Loading client dashboard...</p></div></div>;
-  return <div className="clientDashboardShell">
-    <aside className="clientSide"><div className="sideBrand"><div className="brandMark">AI</div><div><strong>Client Dashboard</strong><small>{client?.name || client?.email}</small></div></div><a className="clientNavLink" href="/">Homepage chat</a><button className="newChatBtn" onClick={()=>setMessages([])}>New chat</button><button className="newChatBtn" onClick={logout}>Logout</button></aside>
-    <main className="clientMain"><header className="clientHeader"><div><h1>Welcome{client?.name ? `, ${client.name}` : ''}</h1><p>Your private client dashboard includes a chat-enabled support widget, product help, and service guidance.</p></div></header>
-      <section className="clientCards"><div className="clientInfoCard"><h3>Client Details</h3><p><b>Email:</b> {client?.email}</p>{client?.company_name && <p><b>Company:</b> {client.company_name}</p>}{client?.phone && <p><b>Phone:</b> {client.phone}</p>}</div><div className="clientInfoCard"><h3>Quick Actions</h3><p>Ask the assistant about products, booking, service details, or document support.</p></div></section>
-      <section className="clientChatWidget"><div className="widgetHeader"><h2>Support Chat</h2><span>{settings.brand_subtitle || 'AI Concierge'}</span></div><div className="widgetMessages">{!messages.length && <div className="empty smallEmpty"><h3>How can we help?</h3><p>Ask about products, services, pricing, FAQs, or booking.</p></div>}{messages.map((m,i)=><div key={i} className={`msg ${m.role}`}><p>{m.text}</p>{m.products?.length>0 && <div className="cards">{m.products.map(p=><ProductCard key={p.id} product={p}/>)}</div>}</div>)}{loading && <div className="msg assistant"><p>Thinking...</p></div>}</div><form className="widgetComposer" onSubmit={submit}><input value={input} onChange={e=>setInput(e.target.value)} placeholder="Ask your client support question..."/><button><Send size={18}/> Send</button></form></section>
-      <section className="clientCards"><div className="clientInfoCard"><h3>Products</h3>{products.slice(0,5).map(p=><p key={p.id}>{p.name} - <Money value={p.price} currency={p.currency}/></p>)}</div><div className="clientInfoCard"><h3>Services</h3>{services.slice(0,5).map(s=><p key={s.id}>{s.name} - <Money value={s.price} currency={s.currency}/></p>)}</div></section>
-    </main>
-  </div>;
+
+  function historyStorageKey(clientKey) {
+    return `client_chat_history_${clientKey || 'unknown'}`;
+  }
+
+  function rowsToMessages(rows = []) {
+    const output = [];
+
+    rows.forEach(row => {
+      if (row.message) {
+        output.push({
+          role: 'user',
+          text: row.message,
+          created_at: row.created_at
+        });
+      }
+
+      if (row.response) {
+        output.push({
+          role: 'assistant',
+          text: row.response,
+          products: row.products_shown || [],
+          sources: [],
+          created_at: row.created_at
+        });
+      }
+    });
+
+    return output;
+  }
+
+  function saveLocalHistory(clientKey, nextMessages) {
+    try {
+      localStorage.setItem(
+        historyStorageKey(clientKey),
+        JSON.stringify(nextMessages.slice(-100))
+      );
+    } catch {
+      // Ignore browser storage errors.
+    }
+  }
+
+  function loadLocalHistory(clientKey) {
+    try {
+      const saved = localStorage.getItem(historyStorageKey(clientKey));
+      const parsed = saved ? JSON.parse(saved) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+
+  useEffect(() => {
+    clientMe()
+      .then(c => {
+        setClient(c);
+        setAuthChecked(true);
+
+        const clientKey = getClientKey(c);
+        const localHistory = loadLocalHistory(clientKey);
+
+        if (localHistory.length > 0) {
+          setMessages(localHistory);
+        }
+
+        setHistoryLoading(true);
+
+        getClientChatHistory()
+          .then(rows => {
+            const historyMessages = rowsToMessages(rows || []);
+
+            if (historyMessages.length > 0) {
+              setMessages(historyMessages);
+              saveLocalHistory(clientKey, historyMessages);
+            }
+          })
+          .catch(() => {
+            // If backend history endpoint is unavailable, keep the local backup only.
+          })
+          .finally(() => setHistoryLoading(false));
+      })
+      .catch(() => {
+        setAuthChecked(true);
+        location.href = '/client-login';
+      });
+
+    getProducts().then(setProducts);
+    getServices().then(setServices);
+    getChatSettings().then(setSettings).catch(() => {});
+  }, []);
+
+  function logout() {
+    logoutClient();
+    location.href = '/client-login';
+  }
+
+  function newChat() {
+    setMessages([]);
+
+    try {
+      localStorage.removeItem(historyStorageKey(getClientKey(client)));
+    } catch {
+      // Ignore browser storage errors.
+    }
+  }
+
+  async function submit(e) {
+    e.preventDefault();
+
+    const text = input.trim();
+
+    if (!text || loading) return;
+
+    const clientKey = getClientKey(client);
+
+    const userMessage = {
+      role: 'user',
+      text,
+      created_at: new Date().toISOString()
+    };
+
+    setInput('');
+
+    setMessages(current => {
+      const next = [...current, userMessage];
+      saveLocalHistory(clientKey, next);
+      return next;
+    });
+
+    setLoading(true);
+
+    try {
+      const res = await sendChat({
+        message: text,
+        visitor_id: `client:${client?.id || visitorId}`,
+        lang: navigator.language || 'en'
+      });
+
+      const assistantMessage = {
+        role: 'assistant',
+        text: res.answer,
+        products: res.products || [],
+        sources: res.sources || [],
+        created_at: new Date().toISOString()
+      };
+
+      setMessages(current => {
+        const next = [...current, assistantMessage];
+        saveLocalHistory(clientKey, next);
+        return next;
+      });
+    } catch {
+      const errorMessage = {
+        role: 'assistant',
+        text: 'Sorry, the chat service is unavailable. Please contact info6@malriffaie.com.',
+        created_at: new Date().toISOString()
+      };
+
+      setMessages(current => {
+        const next = [...current, errorMessage];
+        saveLocalHistory(clientKey, next);
+        return next;
+      });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  if (!authChecked) {
+    return (
+      <div className="loginShell">
+        <div className="loginCard">
+          <p>Loading client dashboard...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="clientDashboardShell">
+      <aside className="clientSide">
+        <div className="sideBrand">
+          <div className="brandMark">AI</div>
+          <div>
+            <strong>Client Dashboard</strong>
+            <small>{client?.name || client?.email}</small>
+          </div>
+        </div>
+
+        <a className="clientNavLink" href="/">Homepage chat</a>
+        <button className="newChatBtn" onClick={newChat}>New chat</button>
+        <button className="newChatBtn" onClick={logout}>Logout</button>
+      </aside>
+
+      <main className="clientMain">
+        <header className="clientHeader">
+          <div>
+            <h1>Welcome{client?.name ? `, ${client.name}` : ''}</h1>
+            <p>Your private client dashboard includes a chat-enabled support widget, product help, and service guidance.</p>
+          </div>
+        </header>
+
+        <section className="clientCards">
+          <div className="clientInfoCard">
+            <h3>Client Details</h3>
+            <p><b>Email:</b> {client?.email}</p>
+            {client?.company_name && <p><b>Company:</b> {client.company_name}</p>}
+            {client?.phone && <p><b>Phone:</b> {client.phone}</p>}
+          </div>
+
+          <div className="clientInfoCard">
+            <h3>Quick Actions</h3>
+            <p>Ask the assistant about products, booking, service details, or document support.</p>
+          </div>
+        </section>
+
+        <section className="clientChatWidget">
+          <div className="widgetHeader">
+            <h2>Support Chat</h2>
+            <span>{settings.brand_subtitle || 'AI Concierge'}</span>
+          </div>
+
+          <div className="widgetMessages">
+            {historyLoading && !messages.length && (
+              <div className="empty smallEmpty">
+                <h3>Loading previous chat history...</h3>
+                <p>Please wait while we restore your previous conversations.</p>
+              </div>
+            )}
+
+            {!historyLoading && !messages.length && (
+              <div className="empty smallEmpty">
+                <h3>How can we help?</h3>
+                <p>Ask about products, services, pricing, FAQs, or booking.</p>
+              </div>
+            )}
+
+            {messages.map((m, i) => (
+              <div key={i} className={`msg ${m.role}`}>
+                <p>{m.text}</p>
+
+                {m.products?.length > 0 && (
+                  <div className="cards">
+                    {m.products.map(p => <ProductCard key={p.id} product={p} />)}
+                  </div>
+                )}
+              </div>
+            ))}
+
+            {loading && (
+              <div className="msg assistant">
+                <p>Thinking...</p>
+              </div>
+            )}
+          </div>
+
+          <form className="widgetComposer" onSubmit={submit}>
+            <input
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              placeholder="Ask your client support question..."
+            />
+            <button><Send size={18}/> Send</button>
+          </form>
+        </section>
+
+        <section className="clientCards">
+          <div className="clientInfoCard">
+            <h3>Products</h3>
+            {products.slice(0,5).map(p => <p key={p.id}>{p.name} - <Money value={p.price} currency={p.currency}/></p>)}
+          </div>
+
+          <div className="clientInfoCard">
+            <h3>Services</h3>
+            {services.slice(0,5).map(s => <p key={s.id}>{s.name} - <Money value={s.price} currency={s.currency}/></p>)}
+          </div>
+        </section>
+      </main>
+    </div>
+  );
 }
 
 function LoginPage() {
