@@ -1009,6 +1009,8 @@ function ClientDashboard() {
   const [services, setServices] = useState([]);
   const [settings, setSettings] = useState({});
   const [messages, setMessages] = useState([]);
+  const [chatSessions, setChatSessions] = useState([]);
+  const [activeSessionId, setActiveSessionId] = useState(null);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const visitorId = useVisitorId();
@@ -1017,16 +1019,53 @@ function ClientDashboard() {
     return clientData?.id || clientData?.email || 'unknown';
   }
 
-  function historyStorageKey(clientKey) {
-    return `client_chat_history_${clientKey || 'unknown'}`;
+  function clientHistoryKey(clientKey) {
+    return `client_chat_sessions_${clientKey || 'unknown'}`;
   }
 
-  function rowsToMessages(rows = []) {
-    const output = [];
+  function makeSessionTitle(text) {
+    const clean = String(text || '').trim();
+
+    if (!clean) return 'New chat';
+
+    return clean.length > 34 ? `${clean.slice(0, 34)}...` : clean;
+  }
+
+  function formatSessionTime(value) {
+    try {
+      return new Date(value).toLocaleString([], {
+        month: 'short',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+    } catch {
+      return '';
+    }
+  }
+
+  function rowsToSessions(rows = []) {
+    const grouped = {};
 
     rows.forEach(row => {
+      const sessionId =
+        row.session_id ||
+        row.conversation_id ||
+        row.thread_id ||
+        row.visitor_id ||
+        'default';
+
+      if (!grouped[sessionId]) {
+        grouped[sessionId] = {
+          id: `server:${sessionId}`,
+          title: makeSessionTitle(row.message || 'Previous chat'),
+          updatedAt: row.created_at || new Date().toISOString(),
+          messages: []
+        };
+      }
+
       if (row.message) {
-        output.push({
+        grouped[sessionId].messages.push({
           role: 'user',
           text: row.message,
           created_at: row.created_at
@@ -1034,7 +1073,7 @@ function ClientDashboard() {
       }
 
       if (row.response) {
-        output.push({
+        grouped[sessionId].messages.push({
           role: 'assistant',
           text: row.response,
           products: row.products_shown || [],
@@ -1042,30 +1081,106 @@ function ClientDashboard() {
           created_at: row.created_at
         });
       }
+
+      grouped[sessionId].updatedAt = row.created_at || grouped[sessionId].updatedAt;
     });
 
-    return output;
+    return Object.values(grouped)
+      .filter(session => session.messages.length > 0)
+      .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
   }
 
-  function saveLocalHistory(clientKey, nextMessages) {
+  function saveClientSessions(clientKey, sessions) {
     try {
       localStorage.setItem(
-        historyStorageKey(clientKey),
-        JSON.stringify(nextMessages.slice(-100))
+        clientHistoryKey(clientKey),
+        JSON.stringify(sessions.slice(0, 30))
       );
     } catch {
       // Ignore browser storage errors.
     }
   }
 
-  function loadLocalHistory(clientKey) {
+  function loadClientSessions(clientKey) {
     try {
-      const saved = localStorage.getItem(historyStorageKey(clientKey));
+      const saved = localStorage.getItem(clientHistoryKey(clientKey));
       const parsed = saved ? JSON.parse(saved) : [];
       return Array.isArray(parsed) ? parsed : [];
     } catch {
       return [];
     }
+  }
+
+  function openChatSession(session) {
+    setActiveSessionId(session.id);
+    setMessages(session.messages || []);
+  }
+
+  function clearAllClientHistory() {
+    const clientKey = getClientKey(client);
+
+    setChatSessions([]);
+    setMessages([]);
+    setActiveSessionId(null);
+
+    try {
+      localStorage.removeItem(clientHistoryKey(clientKey));
+    } catch {
+      // Ignore browser storage errors.
+    }
+  }
+
+  function removeChatSession(sessionId) {
+    const clientKey = getClientKey(client);
+
+    setChatSessions(current => {
+      const next = current.filter(session => session.id !== sessionId);
+      saveClientSessions(clientKey, next);
+      return next;
+    });
+
+    if (activeSessionId === sessionId) {
+      setActiveSessionId(null);
+      setMessages([]);
+    }
+  }
+
+  function saveCurrentConversation(nextMessages) {
+    const clientKey = getClientKey(client);
+
+    if (!clientKey || !nextMessages.length) return;
+
+    const firstUserMessage =
+      nextMessages.find(message => message.role === 'user')?.text ||
+      'New chat';
+
+    const sessionId = activeSessionId || crypto.randomUUID();
+
+    const session = {
+      id: sessionId,
+      title: makeSessionTitle(firstUserMessage),
+      updatedAt: new Date().toISOString(),
+      messages: nextMessages
+    };
+
+    setActiveSessionId(sessionId);
+
+    setChatSessions(current => {
+      const existingIndex = current.findIndex(item => item.id === sessionId);
+      let next;
+
+      if (existingIndex >= 0) {
+        next = [...current];
+        next[existingIndex] = session;
+      } else {
+        next = [session, ...current];
+      }
+
+      next.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+      saveClientSessions(clientKey, next);
+
+      return next;
+    });
   }
 
   useEffect(() => {
@@ -1075,25 +1190,41 @@ function ClientDashboard() {
         setAuthChecked(true);
 
         const clientKey = getClientKey(c);
-        const localHistory = loadLocalHistory(clientKey);
+        const localSessions = loadClientSessions(clientKey);
 
-        if (localHistory.length > 0) {
-          setMessages(localHistory);
+        if (localSessions.length > 0) {
+          setChatSessions(localSessions);
+          setActiveSessionId(localSessions[0].id);
+          setMessages(localSessions[0].messages || []);
         }
 
         setHistoryLoading(true);
 
         getClientChatHistory()
           .then(rows => {
-            const historyMessages = rowsToMessages(rows || []);
+            const serverSessions = rowsToSessions(rows || []);
 
-            if (historyMessages.length > 0) {
-              setMessages(historyMessages);
-              saveLocalHistory(clientKey, historyMessages);
+            if (serverSessions.length > 0) {
+              const mergedSessions = [...serverSessions];
+
+              localSessions.forEach(localSession => {
+                const exists = mergedSessions.some(session => session.id === localSession.id);
+
+                if (!exists) {
+                  mergedSessions.push(localSession);
+                }
+              });
+
+              mergedSessions.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+
+              setChatSessions(mergedSessions);
+              setActiveSessionId(mergedSessions[0].id);
+              setMessages(mergedSessions[0].messages || []);
+              saveClientSessions(clientKey, mergedSessions);
             }
           })
           .catch(() => {
-            // If backend history endpoint is unavailable, keep the local backup only.
+            // If backend history endpoint is unavailable, keep the local sidebar history.
           })
           .finally(() => setHistoryLoading(false));
       })
@@ -1114,12 +1245,8 @@ function ClientDashboard() {
 
   function newChat() {
     setMessages([]);
-
-    try {
-      localStorage.removeItem(historyStorageKey(getClientKey(client)));
-    } catch {
-      // Ignore browser storage errors.
-    }
+    setActiveSessionId(null);
+    setTimeout(() => document.querySelector('.widgetComposer input')?.focus(), 10);
   }
 
   async function submit(e) {
@@ -1128,8 +1255,6 @@ function ClientDashboard() {
     const text = input.trim();
 
     if (!text || loading) return;
-
-    const clientKey = getClientKey(client);
 
     const userMessage = {
       role: 'user',
@@ -1141,7 +1266,7 @@ function ClientDashboard() {
 
     setMessages(current => {
       const next = [...current, userMessage];
-      saveLocalHistory(clientKey, next);
+      saveCurrentConversation(next);
       return next;
     });
 
@@ -1164,7 +1289,7 @@ function ClientDashboard() {
 
       setMessages(current => {
         const next = [...current, assistantMessage];
-        saveLocalHistory(clientKey, next);
+        saveCurrentConversation(next);
         return next;
       });
     } catch {
@@ -1176,7 +1301,7 @@ function ClientDashboard() {
 
       setMessages(current => {
         const next = [...current, errorMessage];
-        saveLocalHistory(clientKey, next);
+        saveCurrentConversation(next);
         return next;
       });
     } finally {
@@ -1206,8 +1331,64 @@ function ClientDashboard() {
         </div>
 
         <a className="clientNavLink" href="/">Homepage chat</a>
-        <button className="newChatBtn" onClick={newChat}>New chat</button>
-        <button className="newChatBtn" onClick={logout}>Logout</button>
+
+        <button className="newChatBtn" onClick={newChat}>
+          New chat
+        </button>
+
+        <div className="clientHistoryBlock">
+          <div className="clientHistoryHeader">
+            <h3>Chat History</h3>
+
+            {chatSessions.length > 0 && (
+              <button type="button" onClick={clearAllClientHistory}>
+                Clear all
+              </button>
+            )}
+          </div>
+
+          {historyLoading && chatSessions.length === 0 && (
+            <p className="historyMuted">Loading history...</p>
+          )}
+
+          {!historyLoading && chatSessions.length === 0 && (
+            <p className="historyMuted">No previous chats yet.</p>
+          )}
+
+          {chatSessions.map(session => (
+            <button
+              key={session.id}
+              type="button"
+              className={`clientHistoryItem ${activeSessionId === session.id ? 'active' : ''}`}
+              onClick={() => openChatSession(session)}
+            >
+              <span>{session.title}</span>
+              <small>{formatSessionTime(session.updatedAt)}</small>
+
+              <b
+                role="button"
+                tabIndex={0}
+                onClick={e => {
+                  e.stopPropagation();
+                  removeChatSession(session.id);
+                }}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    removeChatSession(session.id);
+                  }
+                }}
+              >
+                ×
+              </b>
+            </button>
+          ))}
+        </div>
+
+        <button className="newChatBtn" onClick={logout}>
+          Logout
+        </button>
       </aside>
 
       <main className="clientMain">
@@ -1239,14 +1420,7 @@ function ClientDashboard() {
           </div>
 
           <div className="widgetMessages">
-            {historyLoading && !messages.length && (
-              <div className="empty smallEmpty">
-                <h3>Loading previous chat history...</h3>
-                <p>Please wait while we restore your previous conversations.</p>
-              </div>
-            )}
-
-            {!historyLoading && !messages.length && (
+            {!messages.length && (
               <div className="empty smallEmpty">
                 <h3>How can we help?</h3>
                 <p>Ask about products, services, pricing, FAQs, or booking.</p>
@@ -1278,19 +1452,25 @@ function ClientDashboard() {
               onChange={e => setInput(e.target.value)}
               placeholder="Ask your client support question..."
             />
-            <button><Send size={18}/> Send</button>
+            <button>
+              <Send size={18}/> Send
+            </button>
           </form>
         </section>
 
         <section className="clientCards">
           <div className="clientInfoCard">
             <h3>Products</h3>
-            {products.slice(0,5).map(p => <p key={p.id}>{p.name} - <Money value={p.price} currency={p.currency}/></p>)}
+            {products.slice(0,5).map(p => (
+              <p key={p.id}>{p.name} - <Money value={p.price} currency={p.currency}/></p>
+            ))}
           </div>
 
           <div className="clientInfoCard">
             <h3>Services</h3>
-            {services.slice(0,5).map(s => <p key={s.id}>{s.name} - <Money value={s.price} currency={s.currency}/></p>)}
+            {services.slice(0,5).map(s => (
+              <p key={s.id}>{s.name} - <Money value={s.price} currency={s.currency}/></p>
+            ))}
           </div>
         </section>
       </main>
