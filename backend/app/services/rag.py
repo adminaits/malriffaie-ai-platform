@@ -399,17 +399,40 @@ def _wants_product_list(message: str) -> bool:
 
 
 def _wants_service_list(message: str) -> bool:
-    low = message.lower().strip()
+    low = (message or "").lower().strip()
 
     return any(
         phrase in low
         for phrase in [
+            "list services",
             "list all services",
-            "all services",
-            "show services",
+            "list of services",
+            "service list",
             "services list",
-            "what services",
+            "show services",
+            "show me services",
+            "show all services",
+            "show me all services",
             "available services",
+            "what services",
+            "what service",
+            "what services do you have",
+            "what services do you offer",
+            "which services",
+            "describe services",
+            "describe the services",
+            "describe your services",
+            "can you describe services",
+            "can you describe the services",
+            "tell me about services",
+            "tell me about your services",
+            "tell me the services",
+            "explain services",
+            "explain your services",
+            "services available",
+            "services you provide",
+            "services you offer",
+            "your services",
         ]
     )
 
@@ -550,20 +573,64 @@ def _product_list_answer(products: list[dict]) -> str:
 
 def _service_list_answer(services: list[dict]) -> str:
     if not services:
-        return "No services are currently available. Please book a consultation or contact support."
+        return (
+            "No services are currently available. "
+            "Please book a consultation or contact support."
+        )
 
     lines = ["Here are the services currently available:", ""]
 
     for idx, service in enumerate(services, 1):
+        name = service.get("name") or "Unnamed service"
+        description = service.get("description") or ""
+
+        lines.append(f"{idx}. {name}")
         lines.append(
-            f"{idx}. {service.get('name')} - "
-            f"{_format_price(service.get('price'), service.get('currency'))}"
+            f"   Price: {_format_price(service.get('price'), service.get('currency'))}"
         )
 
-    lines.append("")
-    lines.append("You can tell me what you need and I will recommend the best service.")
+        if description:
+            lines.append(f"   Description: {description}")
+
+        lines.append("")
+
+    lines.append(
+        "Tell me which service you are interested in and I can explain it in more detail."
+    )
 
     return "\n".join(lines)
+
+
+def _matched_service(message: str, services: list[dict]) -> dict | None:
+    low = (message or "").lower()
+
+    for service in sorted(services, key=lambda s: len(s.get("name") or ""), reverse=True):
+        name = (service.get("name") or "").lower()
+        if name and name in low:
+            return service
+
+    if "consultation" in low:
+        for service in services:
+            service_text = f"{service.get('name', '')} {service.get('description', '')}".lower()
+            if "consultation" in service_text:
+                return service
+
+    return None
+
+
+def _service_detail_answer(service: dict) -> str:
+    return "\n".join(
+        [
+            f"Here are the details for {service.get('name')}:",
+            "",
+            service.get("description") or "Professional service.",
+            "",
+            f"Price: {_format_price(service.get('price'), service.get('currency'))}",
+            f"Availability: {'Available' if service.get('available', True) else 'Unavailable'}",
+            "",
+            "Tell me if you would like help booking this service.",
+        ]
+    )
 
 
 def _product_detail_answer(product: dict) -> str:
@@ -612,28 +679,27 @@ def _recommendation_answer(message: str, products: list[dict], services: list[di
     return "\n".join(lines), recommended
 
 
-def _should_answer_deterministically(message: str) -> bool:
-    low = message.lower()
+def _wants_recommendation(message: str) -> bool:
+    low = (message or "").lower().strip()
 
     return any(
         phrase in low
         for phrase in [
+            "recommend",
+            "recommendation",
+            "which product is right",
+            "which product should i",
+            "which service is right",
+            "which service should i",
+            "what should i choose",
+            "best option for me",
+            "best product for",
+            "best service for",
+            "what do you recommend",
+            "help me choose",
             "new business",
             "start business",
             "startup",
-            "which product",
-            "right product",
-            "recommend",
-            "feasibility",
-            "marketing",
-            "partnership",
-            "agreement",
-            "hr manual",
-            "consultation",
-            "price",
-            "cost",
-            "products",
-            "services",
         ]
     )
 
@@ -698,46 +764,52 @@ async def answer_chat(
     answer = None
     used_knowledge = False
 
-    # 1. Public product list questions must always be allowed.
-    if _wants_product_list(message):
+    # 1. Service-list/service-description questions.
+    # This must be checked before product recommendation logic.
+    if _wants_service_list(message):
+        answer = _service_list_answer(ctx["services"])
+        recommended = []
+
+    # 2. Product-list questions.
+    elif _wants_product_list(message):
         answer = _product_list_answer(ctx["products"])
         recommended = ctx["products"][:6]
 
-    # 2. Public service list questions must always be allowed.
-    elif _wants_service_list(message):
-        answer = _service_list_answer(ctx["services"])
-        recommended = ctx["products"][:3]
-
-    # 3. Booking/consultation questions must always be allowed.
+    # 3. Booking/consultation questions.
     elif _wants_booking(message):
         answer = _booking_answer(ctx["services"])
-        recommended = ctx["products"][:3]
+        recommended = []
 
     else:
+        service = _matched_service(message, ctx["services"])
         product = _matched_product(message, ctx["products"])
 
-        # 4. Public product detail questions must always be allowed.
-        if product and any(
-            k in message.lower()
-            for k in [
-                "tell",
-                "detail",
-                "price",
-                "buy",
-                "about",
-                "more",
-                "know",
-                "explain",
-                "what is",
-                "what about",
-                "cost",
-            ]
-        ):
+        detail_words = [
+            "tell",
+            "detail",
+            "price",
+            "about",
+            "more",
+            "know",
+            "explain",
+            "what is",
+            "what about",
+            "cost",
+            "describe",
+        ]
+
+        # 4. Specific service detail questions.
+        if service and any(k in message.lower() for k in detail_words):
+            answer = _service_detail_answer(service)
+            recommended = []
+
+        # 5. Specific product detail questions.
+        elif product and any(k in message.lower() for k in detail_words + ["buy"]):
             answer = _product_detail_answer(product)
             recommended = [product]
 
-        # 5. Public recommendation/product/service questions must be allowed.
-        elif _should_answer_deterministically(message):
+        # 6. Only genuine recommendation requests use product recommendations.
+        elif _wants_recommendation(message):
             answer, recommended = _recommendation_answer(
                 message,
                 ctx["products"],
