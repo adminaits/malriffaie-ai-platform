@@ -381,19 +381,70 @@ def recommend_products(message: str, products: list[dict]) -> list[dict]:
 
 
 def _wants_product_list(message: str) -> bool:
-    low = message.lower().strip()
+    low = (message or "").lower().strip()
+
+    exact_requests = {
+        "product",
+        "products",
+        "product please",
+        "products please",
+        "product list",
+        "products list",
+        "list product",
+        "list products",
+        "list all products",
+        "list of products",
+        "all products",
+        "show product",
+        "show products",
+        "show me products",
+        "show me the products",
+        "show all products",
+        "show me all products",
+        "available products",
+        "what product",
+        "what products",
+        "what products do you have",
+        "what products do you offer",
+        "which products",
+        "tell me about products",
+        "tell me about your products",
+        "tell me the products",
+        "describe products",
+        "describe your products",
+        "explain products",
+        "your products",
+        "products available",
+        "products you provide",
+        "products you offer",
+        "what do you sell",
+        "catalog",
+        "catalogue",
+        "product catalog",
+        "product catalogue",
+    }
+
+    if low in exact_requests:
+        return True
 
     return any(
         phrase in low
         for phrase in [
             "list all products",
-            "all products",
-            "show products",
-            "products list",
-            "what products",
-            "available products",
+            "list of products",
             "show me products",
-            "what do you sell",
+            "show all products",
+            "show me all products",
+            "products list",
+            "product list",
+            "available products",
+            "what products do you have",
+            "what products do you offer",
+            "tell me about products",
+            "describe products",
+            "describe your products",
+            "product catalog",
+            "product catalogue",
         ]
     )
 
@@ -552,20 +603,29 @@ def _matched_product(message: str, products: list[dict]) -> dict | None:
 
 def _product_list_answer(products: list[dict]) -> str:
     if not products:
-        return "No products are currently available. Please book a consultation or contact support."
-
-    lines = ["Here are the products currently available:", ""]
-
-    for idx, product in enumerate(products, 1):
-        lines.append(
-            f"{idx}. {product.get('name')} - "
-            f"{_format_price(product.get('price'), product.get('currency'))}"
+        return (
+            "No products are currently available. "
+            "Please book a consultation or contact support."
         )
 
-    lines.append("")
+    lines = ["Here are all the products currently available:", ""]
+
+    for idx, product in enumerate(products, 1):
+        name = product.get("name") or "Unnamed product"
+        description = product.get("description") or ""
+
+        lines.append(f"{idx}. {name}")
+        lines.append(
+            f"   Price: {_format_price(product.get('price'), product.get('currency'))}"
+        )
+
+        if description:
+            lines.append(f"   Description: {description}")
+
+        lines.append("")
+
     lines.append(
-        "You can click a product in the sidebar to view details, "
-        "or tell me what you need and I will recommend the best option."
+        "You can select any product from the sidebar or use the Buy Now option."
     )
 
     return "\n".join(lines)
@@ -773,7 +833,8 @@ async def answer_chat(
     # 2. Product-list questions.
     elif _wants_product_list(message):
         answer = _product_list_answer(ctx["products"])
-        recommended = ctx["products"][:6]
+        # Return every available product so the frontend can render the full list.
+        recommended = ctx["products"]
 
     # 3. Booking/consultation questions.
     elif _wants_booking(message):
