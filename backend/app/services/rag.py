@@ -2,6 +2,8 @@ from app.db import supabase
 from app.services.huggingface import HuggingFaceClient
 from app.config import get_settings
 from datetime import date
+import re
+from statistics import mean, median
 
 settings = get_settings()
 
@@ -764,6 +766,214 @@ def _wants_recommendation(message: str) -> bool:
     )
 
 
+
+def _wants_anonymized_benchmark(message: str) -> bool:
+    low = (message or "").lower().strip()
+
+    benchmark_terms = [
+        "average", "avg", "benchmark", "typical budget", "typical cost",
+        "usual budget", "usual cost", "average budget", "average cost",
+        "setup budget", "setup cost", "startup budget", "startup cost",
+        "initial investment", "investment needed", "how much to start",
+        "how much does it cost to start", "cost to set up", "cost to setup",
+        "budget to set up", "budget to setup",
+    ]
+
+    return any(term in low for term in benchmark_terms)
+
+
+def _detect_industry(message: str) -> str | None:
+    low = (message or "").lower()
+
+    aliases = {
+        "healthcare": ["healthcare", "health care", "medical", "clinic", "home care", "homecare", "nursing", "wellness"],
+        "salon": ["salon", "beauty salon", "beauty business", "spa", "hair salon", "nail salon"],
+        "cafe": ["cafe", "coffee shop", "coffeeshop", "restaurant", "food business"],
+        "construction": ["construction", "contracting", "contractor", "building materials"],
+    }
+
+    for industry, terms in aliases.items():
+        if any(term in low for term in terms):
+            return industry
+
+    return None
+
+
+def _row_matches_industry(row: dict, industry: str) -> bool:
+    if not industry:
+        return False
+
+    metadata = row.get("metadata") or {}
+    content = (row.get("content") or "").lower()
+    meta_text = str(metadata).lower()
+
+    if isinstance(metadata, dict):
+        explicit = (
+            metadata.get("industry")
+            or metadata.get("dataset")
+            or metadata.get("sector")
+            or metadata.get("business_type")
+        )
+        if isinstance(explicit, str) and explicit.strip().lower() == industry:
+            return True
+
+    terms_map = {
+        "healthcare": ["healthcare", "health care", "medical", "clinic", "home care", "homecare", "nursing", "wellness"],
+        "salon": ["salon", "beauty", "spa", "hair", "nail"],
+        "cafe": ["cafe", "coffee", "restaurant", "food"],
+        "construction": ["construction", "contracting", "contractor", "building materials"],
+    }
+
+    return any(term in content or term in meta_text for term in terms_map.get(industry, [industry]))
+
+
+def _benchmark_enabled(row: dict) -> bool:
+    metadata = row.get("metadata") or {}
+
+    if isinstance(metadata, dict):
+        if metadata.get("benchmark_enabled") is False:
+            return False
+        if metadata.get("benchmark_enabled") is True:
+            return True
+
+    return row.get("source_type") == "google_drive"
+
+
+def _extract_bhd_amounts(text: str) -> list[float]:
+    text = text or ""
+    amounts = []
+
+    patterns = [
+        r'(?i)(?:BHD|BD|B\.D\.|د\.ب)\s*([0-9][0-9,]*(?:\.[0-9]+)?)',
+        r'(?i)([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:BHD|BD|B\.D\.|د\.ب)',
+    ]
+
+    for pattern in patterns:
+        for match in re.findall(pattern, text):
+            try:
+                value = float(str(match).replace(",", ""))
+                if value > 0:
+                    amounts.append(value)
+            except Exception:
+                pass
+
+    return amounts
+
+
+def _extract_benchmark_amount(row: dict) -> float | None:
+    metadata = row.get("metadata") or {}
+
+    if isinstance(metadata, dict):
+        for key in [
+            "benchmark_amount",
+            "startup_budget",
+            "setup_budget",
+            "startup_cost",
+            "setup_cost",
+            "initial_investment",
+            "investment_amount",
+            "total_project_cost",
+        ]:
+            value = metadata.get(key)
+            if value not in (None, ""):
+                try:
+                    return float(str(value).replace(",", ""))
+                except Exception:
+                    pass
+
+    content = row.get("content") or ""
+    priority_phrases = [
+        "startup budget", "setup budget", "startup cost", "setup cost",
+        "initial investment", "total investment", "total project cost",
+        "capital required", "investment required", "project cost",
+    ]
+
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+
+    for phrase in priority_phrases:
+        for line in lines:
+            if phrase in line.lower():
+                amounts = _extract_bhd_amounts(line)
+                if amounts:
+                    return max(amounts)
+
+    amounts = _extract_bhd_amounts(content)
+    if len(amounts) == 1:
+        return amounts[0]
+
+    return None
+
+
+def _load_synced_benchmark_rows(industry: str) -> list[dict]:
+    rows = _load_knowledge_rows()
+    matched = []
+
+    for row in rows:
+        if row.get("source_type") != "google_drive":
+            continue
+        if not _is_private_row(row):
+            continue
+        if not _benchmark_enabled(row):
+            continue
+        if not _row_matches_industry(row, industry):
+            continue
+        matched.append(row)
+
+    return matched
+
+
+def _build_anonymized_benchmark_answer(message: str) -> str | None:
+    industry = _detect_industry(message)
+    if not industry:
+        return None
+
+    rows = _load_synced_benchmark_rows(industry)
+
+    grouped = {}
+    for row in rows:
+        source_id = row.get("source_id") or row.get("id")
+        grouped.setdefault(source_id, []).append(row)
+
+    case_amounts = []
+
+    for source_rows in grouped.values():
+        values = []
+        for row in source_rows:
+            amount = _extract_benchmark_amount(row)
+            if amount is not None:
+                values.append(amount)
+
+        if values:
+            case_amounts.append(max(values))
+
+    if len(case_amounts) < 3:
+        return (
+            f"I found {len(case_amounts)} eligible anonymized {industry} case"
+            f"{'s' if len(case_amounts) != 1 else ''} in the synced private knowledge base. "
+            "At least 3 distinct cases are required before I provide an aggregate budget benchmark."
+        )
+
+    avg_value = mean(case_amounts)
+    median_value = median(case_amounts)
+    min_value = min(case_amounts)
+    max_value = max(case_amounts)
+    label = industry.replace("_", " ").title()
+
+    return "\n".join(
+        [
+            f"Based on {len(case_amounts)} anonymized {label} cases in the synced private knowledge base:",
+            "",
+            f"Average setup/startup budget: {_format_price(avg_value, 'BHD')}",
+            f"Median setup/startup budget: {_format_price(median_value, 'BHD')}",
+            f"Observed range: {_format_price(min_value, 'BHD')} to {_format_price(max_value, 'BHD')}",
+            "",
+            "This is an aggregate internal benchmark only.",
+            "Individual business names, identities, source files, and record-level amounts are not disclosed.",
+        ]
+    )
+
+
+
 def _build_huggingface_client(cfg: dict) -> HuggingFaceClient:
     token = (
         cfg.get("hugging_face_token")
@@ -824,24 +1034,33 @@ async def answer_chat(
     answer = None
     used_knowledge = False
 
+    # Logged-in clients/admins can request anonymized aggregate benchmarks
+    # from synced private Google Drive knowledge.
+    if client_logged_in and _wants_anonymized_benchmark(message):
+        benchmark_answer = _build_anonymized_benchmark_answer(message)
+        if benchmark_answer:
+            answer = benchmark_answer
+            recommended = []
+            used_knowledge = False
+
     # 1. Service-list/service-description questions.
     # This must be checked before product recommendation logic.
-    if _wants_service_list(message):
+    if answer is None and _wants_service_list(message):
         answer = _service_list_answer(ctx["services"])
         recommended = []
 
     # 2. Product-list questions.
-    elif _wants_product_list(message):
+    elif answer is None and _wants_product_list(message):
         answer = _product_list_answer(ctx["products"])
         # Return every available product so the frontend can render the full list.
         recommended = ctx["products"]
 
     # 3. Booking/consultation questions.
-    elif _wants_booking(message):
+    elif answer is None and _wants_booking(message):
         answer = _booking_answer(ctx["services"])
         recommended = []
 
-    else:
+    elif answer is None:
         service = _matched_service(message, ctx["services"])
         product = _matched_product(message, ctx["products"])
 
