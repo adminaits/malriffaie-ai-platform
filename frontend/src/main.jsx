@@ -287,7 +287,31 @@ const tabs = [
 ];
 
 const defaults = {
-  ai_settings: { replace_homepage_with_chat: true, chat_greeting: 'Hi, I am your support concierge. I can help with our products, services, FAQs, documents, and bookings. What would you like to know?', hugging_face_token: '', model_name: 'Qwen/Qwen3-8B', custom_model_name: '', custom_endpoint_url: '', embedding_model: 'BAAI/bge-m3', custom_embedding_model_name: '', embedding_endpoint_url: '', system_prompt: 'Act as a customer support representative. Answer from Malriffaie knowledge base, products, and services. If not found, say clearly and ask the user to book a consultation.', temperature: 0.3, top_p: 0.9, max_tokens: 512, timeout: 30, retry_count: 2, rate_limit: 10, fallback_message: 'I do not have that information yet. I can arrange a human handoff for you.', use_cases: ['Customer support automation','Website FAQs and knowledge base','E-commerce product assistance','Documentation search','Internal company wikis'], optional_rule: '' },
+  ai_settings: {
+    replace_homepage_with_chat: true,
+    chat_greeting: 'Hi, I am your support concierge. I can help with our products, services, FAQs, documents, and bookings. What would you like to know?',
+    hugging_face_token: '',
+    model_name: 'Qwen/Qwen3-8B',
+    custom_model_name: '',
+    custom_endpoint_url: '',
+    embedding_model: 'BAAI/bge-m3',
+    custom_embedding_model_name: '',
+    embedding_endpoint_url: '',
+    system_prompt: 'Act as a customer support representative. Answer from Malriffaie knowledge base, products, and services. If not found, say clearly and ask the user to book a consultation.',
+    temperature: 0.3,
+    top_p: 0.9,
+    max_tokens: 512,
+    timeout: 30,
+    retry_count: 2,
+    rate_limit: 10,
+    fallback_message: 'I do not have that information yet. I can arrange a human handoff for you.',
+    benchmark_min_cases: 3,
+    benchmark_insufficient_message: 'I found {count} eligible anonymized {industry} case{plural} in the synced private knowledge base. At least {minimum} distinct cases are required before I provide an aggregate budget benchmark.',
+    benchmark_result_intro: 'Based on {count} anonymized {industry_label} cases in the synced private knowledge base:',
+    benchmark_result_footer: 'This is an aggregate internal benchmark only. Individual business names, identities, source files, and record-level amounts are not disclosed.',
+    use_cases: ['Customer support automation','Website FAQs and knowledge base','E-commerce product assistance','Documentation search','Internal company wikis'],
+    optional_rule: ''
+  },
   chat_settings: { brand_title:'Malriffaie', brand_subtitle:'AI Concierge', hero_title:'How can we help you today?', show_tagline:true, input_placeholder:'Describe what you need...', empty_state_title:'Ask about products, services, or bookings', empty_state_message:'I can recommend the right product or help you book a consultation.', show_chips:true, show_sources:false, sticky_input:true, auto_focus:true, show_sidebar:true, show_services_sidebar:true, show_products_sidebar:true, footer_disclaimer:'AI responses may need human confirmation for complex cases.' },
   products: { name:'', description:'', price:'', currency:'BHD', image_url:'', available:true },
   services: { name:'', description:'', price:'', currency:'BHD', available:true },
@@ -366,6 +390,21 @@ function cleanPayload(table, form) {
   if (table === 'ai_settings') {
     if (payload.model_name === 'custom') payload.model_name = payload.custom_model_name;
     if (payload.embedding_model === 'custom') payload.embedding_model = payload.custom_embedding_model_name;
+
+    if (
+      payload.benchmark_min_cases !== '' &&
+      payload.benchmark_min_cases !== null &&
+      payload.benchmark_min_cases !== undefined
+    ) {
+      const minimumCases = Number(payload.benchmark_min_cases);
+
+      payload.benchmark_min_cases =
+        Number.isFinite(minimumCases) && minimumCases > 0
+          ? Math.floor(minimumCases)
+          : 3;
+    } else {
+      payload.benchmark_min_cases = 3;
+    }
 
     delete payload.custom_model_name;
     delete payload.custom_embedding_model_name;
@@ -453,22 +492,182 @@ function Select({ value='', onChange, children }) { return <select value={value 
 function AiSettingsForm({ form, setForm }) {
   const set = (k,v) => setForm(f=>({ ...f, [k]:v }));
   const useCases = form.use_cases || [];
-  const toggleUseCase = (name, checked) => set('use_cases', checked ? [...new Set([...useCases, name])] : useCases.filter(x=>x!==name));
+  const toggleUseCase = (name, checked) => set(
+    'use_cases',
+    checked ? [...new Set([...useCases, name])] : useCases.filter(x=>x!==name)
+  );
+
   return <div className="settingsForm">
-    <Field label="Replace homepage with chat"><Check checked={form.replace_homepage_with_chat ?? true} onChange={v=>set('replace_homepage_with_chat', v)} /></Field>
-    <Field label="Chat greeting"><Textarea rows={5} value={form.chat_greeting} onChange={v=>set('chat_greeting', v)} /></Field>
-    <Field label="Perfect For" help="Select the use cases this assistant should be optimized for. These options are added to the prompt context."><div className="checkStack">{useCaseOptions.map(opt=><Check key={opt} label={opt} checked={useCases.includes(opt)} onChange={v=>toggleUseCase(opt, v)} />)}</div></Field>
-    <Field label="Hugging Face access token" help="Stored in backend/Supabase settings and never exposed to frontend JS."><Text type="password" value={form.hugging_face_token} onChange={v=>set('hugging_face_token', v)} /></Field>
-    <Field label="Model" help="Recommended chat model: Qwen/Qwen3-8B. Other Hugging Face instruct models are still available."><Select value={form.model_name} onChange={v=>set('model_name', v)}>{modelOptions.map(m=><option key={m} value={m}>{m === 'custom' ? 'Custom model name' : m}</option>)}</Select></Field>
-    <Field label="Custom model name"><Text value={form.custom_model_name || ''} onChange={v=>set('custom_model_name', v)} /></Field>
-    <Field label="Custom Hugging Face-compatible endpoint URL"><Text value={form.custom_endpoint_url} onChange={v=>set('custom_endpoint_url', v)} /></Field>
-    <Field label="Embedding model" help="Recommended: BAAI/bge-m3 for multilingual semantic retrieval from Malriffaie PDFs."><Select value={form.embedding_model} onChange={v=>set('embedding_model', v)}>{embeddingOptions.map(m=><option key={m} value={m}>{m === 'custom' ? 'Custom embedding model name' : m}</option>)}</Select></Field>
-    <Field label="Custom embedding model name"><Text value={form.custom_embedding_model_name || ''} onChange={v=>set('custom_embedding_model_name', v)} /></Field>
-    <Field label="Embedding endpoint URL"><Text value={form.embedding_endpoint_url} onChange={v=>set('embedding_endpoint_url', v)} /></Field>
-    <Field label="System prompt"><Textarea rows={6} value={form.system_prompt} onChange={v=>set('system_prompt', v)} /></Field>
-    <Field label="Optional extra rule"><Textarea rows={3} value={form.optional_rule} onChange={v=>set('optional_rule', v)} /></Field>
-    <div className="grid2"><Field label="Temperature"><Text type="number" value={form.temperature} onChange={v=>set('temperature', Number(v))} /></Field><Field label="Top P"><Text type="number" value={form.top_p} onChange={v=>set('top_p', Number(v))} /></Field><Field label="Max tokens"><Text type="number" value={form.max_tokens} onChange={v=>set('max_tokens', Number(v))} /></Field><Field label="Timeout seconds"><Text type="number" value={form.timeout} onChange={v=>set('timeout', Number(v))} /></Field><Field label="Retry count"><Text type="number" value={form.retry_count} onChange={v=>set('retry_count', Number(v))} /></Field><Field label="Requests/IP/min"><Text type="number" value={form.rate_limit} onChange={v=>set('rate_limit', Number(v))} /></Field></div>
-    <Field label="Fallback message"><Textarea rows={3} value={form.fallback_message} onChange={v=>set('fallback_message', v)} /></Field>
+    <Field label="Replace homepage with chat">
+      <Check checked={form.replace_homepage_with_chat ?? true} onChange={v=>set('replace_homepage_with_chat', v)} />
+    </Field>
+
+    <Field label="Chat greeting">
+      <Textarea rows={5} value={form.chat_greeting} onChange={v=>set('chat_greeting', v)} />
+    </Field>
+
+    <Field
+      label="Perfect For"
+      help="Select the use cases this assistant should be optimized for. These options are added to the prompt context."
+    >
+      <div className="checkStack">
+        {useCaseOptions.map(opt => (
+          <Check
+            key={opt}
+            label={opt}
+            checked={useCases.includes(opt)}
+            onChange={v=>toggleUseCase(opt, v)}
+          />
+        ))}
+      </div>
+    </Field>
+
+    <Field label="Hugging Face access token" help="Stored in backend/Supabase settings and never exposed to frontend JS.">
+      <Text type="password" value={form.hugging_face_token} onChange={v=>set('hugging_face_token', v)} />
+    </Field>
+
+    <Field label="Model" help="Recommended chat model: Qwen/Qwen3-8B. Other Hugging Face instruct models are still available.">
+      <Select value={form.model_name} onChange={v=>set('model_name', v)}>
+        {modelOptions.map(m=><option key={m} value={m}>{m === 'custom' ? 'Custom model name' : m}</option>)}
+      </Select>
+    </Field>
+
+    <Field label="Custom model name">
+      <Text value={form.custom_model_name || ''} onChange={v=>set('custom_model_name', v)} />
+    </Field>
+
+    <Field label="Custom Hugging Face-compatible endpoint URL">
+      <Text value={form.custom_endpoint_url} onChange={v=>set('custom_endpoint_url', v)} />
+    </Field>
+
+    <Field label="Embedding model" help="Recommended: BAAI/bge-m3 for multilingual semantic retrieval from Malriffaie PDFs.">
+      <Select value={form.embedding_model} onChange={v=>set('embedding_model', v)}>
+        {embeddingOptions.map(m=><option key={m} value={m}>{m === 'custom' ? 'Custom embedding model name' : m}</option>)}
+      </Select>
+    </Field>
+
+    <Field label="Custom embedding model name">
+      <Text value={form.custom_embedding_model_name || ''} onChange={v=>set('custom_embedding_model_name', v)} />
+    </Field>
+
+    <Field label="Embedding endpoint URL">
+      <Text value={form.embedding_endpoint_url} onChange={v=>set('embedding_endpoint_url', v)} />
+    </Field>
+
+    <Field label="System prompt">
+      <Textarea rows={6} value={form.system_prompt} onChange={v=>set('system_prompt', v)} />
+    </Field>
+
+    <Field label="Optional extra rule">
+      <Textarea rows={3} value={form.optional_rule} onChange={v=>set('optional_rule', v)} />
+    </Field>
+
+    <div className="grid2">
+      <Field label="Temperature">
+        <Text type="number" value={form.temperature} onChange={v=>set('temperature', Number(v))} />
+      </Field>
+
+      <Field label="Top P">
+        <Text type="number" value={form.top_p} onChange={v=>set('top_p', Number(v))} />
+      </Field>
+
+      <Field label="Max tokens">
+        <Text type="number" value={form.max_tokens} onChange={v=>set('max_tokens', Number(v))} />
+      </Field>
+
+      <Field label="Timeout seconds">
+        <Text type="number" value={form.timeout} onChange={v=>set('timeout', Number(v))} />
+      </Field>
+
+      <Field label="Retry count">
+        <Text type="number" value={form.retry_count} onChange={v=>set('retry_count', Number(v))} />
+      </Field>
+
+      <Field label="Requests/IP/min">
+        <Text type="number" value={form.rate_limit} onChange={v=>set('rate_limit', Number(v))} />
+      </Field>
+    </div>
+
+    <Field label="Fallback message">
+      <Textarea rows={3} value={form.fallback_message} onChange={v=>set('fallback_message', v)} />
+    </Field>
+
+    <div
+      style={{
+        marginTop: 28,
+        marginBottom: 18,
+        paddingTop: 22,
+        borderTop: '1px solid #e7e9f0'
+      }}
+    >
+      <h3 style={{ margin: '0 0 8px' }}>
+        Anonymized Benchmark Settings
+      </h3>
+
+      <p
+        style={{
+          margin: '0 0 18px',
+          color: '#667085',
+          lineHeight: 1.5
+        }}
+      >
+        Control how logged-in clients receive aggregated benchmark
+        information from the private synced knowledge base.
+      </p>
+    </div>
+
+    <Field
+      label="Minimum benchmark cases"
+      help="Minimum number of distinct business cases required before an anonymized average, median, and range can be shown."
+    >
+      <Text
+        type="number"
+        value={form.benchmark_min_cases ?? 3}
+        onChange={v => {
+          const value = Number(v);
+
+          set(
+            'benchmark_min_cases',
+            Number.isFinite(value) && value > 0
+              ? Math.floor(value)
+              : 3
+          );
+        }}
+      />
+    </Field>
+
+    <Field
+      label="Benchmark insufficient-data message"
+      help="Available placeholders: {count}, {industry}, {industry_label}, {minimum}, {plural}"
+    >
+      <Textarea
+        rows={5}
+        value={form.benchmark_insufficient_message || ''}
+        onChange={v => set('benchmark_insufficient_message', v)}
+      />
+    </Field>
+
+    <Field
+      label="Benchmark result intro"
+      help="Available placeholders: {count}, {industry}, {industry_label}, {minimum}, {plural}"
+    >
+      <Textarea
+        rows={4}
+        value={form.benchmark_result_intro || ''}
+        onChange={v => set('benchmark_result_intro', v)}
+      />
+    </Field>
+
+    <Field
+      label="Benchmark result footer"
+      help="Shown underneath successful benchmark calculations. Use this for your disclaimer or explanation."
+    >
+      <Textarea
+        rows={5}
+        value={form.benchmark_result_footer || ''}
+        onChange={v => set('benchmark_result_footer', v)}
+      />
+    </Field>
   </div>;
 }
 
@@ -1567,6 +1766,7 @@ function AdminPage() {
         `Folders: ${(res.folder_ids_used || []).length}`,
         `Files found: ${res.total_files_found ?? 0}`,
         `Files synced: ${res.synced_files ?? 0}`,
+        `Benchmark tagged: ${res.benchmark_tagged_files ?? 0}`,
         `Chunks created: ${res.total_chunks ?? 0}`,
         `Skipped: ${res.skipped_files ?? 0}`,
         `Visibility: ${res.internal_company_wiki ? 'private/internal' : (res.access_level || 'public')}`,
