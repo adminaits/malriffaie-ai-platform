@@ -922,7 +922,27 @@ def _load_synced_benchmark_rows(industry: str) -> list[dict]:
     return matched
 
 
-def _build_anonymized_benchmark_answer(message: str) -> str | None:
+def _safe_int(value, default: int) -> int:
+    try:
+        parsed = int(value)
+        return parsed if parsed > 0 else default
+    except Exception:
+        return default
+
+
+def _safe_template(template: str, **values) -> str:
+    try:
+        return str(template).format(**values)
+    except Exception:
+        return str(template)
+
+
+def _build_anonymized_benchmark_answer(
+    message: str,
+    cfg: dict | None = None,
+) -> str | None:
+    cfg = cfg or {}
+
     industry = _detect_industry(message)
     if not industry:
         return None
@@ -946,29 +966,64 @@ def _build_anonymized_benchmark_answer(message: str) -> str | None:
         if values:
             case_amounts.append(max(values))
 
-    if len(case_amounts) < 3:
-        return (
-            f"I found {len(case_amounts)} eligible anonymized {industry} case"
-            f"{'s' if len(case_amounts) != 1 else ''} in the synced private knowledge base. "
-            "At least 3 distinct cases are required before I provide an aggregate budget benchmark."
+    minimum_cases = _safe_int(cfg.get("benchmark_min_cases"), 3)
+    count = len(case_amounts)
+    industry_label = industry.replace("_", " ").title()
+
+    if count < minimum_cases:
+        default_message = (
+            "I found {count} eligible anonymized {industry} case{plural} "
+            "in the synced private knowledge base. "
+            "At least {minimum} distinct cases are required before I provide "
+            "an aggregate budget benchmark."
+        )
+
+        template = cfg.get("benchmark_insufficient_message") or default_message
+
+        return _safe_template(
+            template,
+            count=count,
+            industry=industry,
+            industry_label=industry_label,
+            minimum=minimum_cases,
+            plural="s" if count != 1 else "",
         )
 
     avg_value = mean(case_amounts)
     median_value = median(case_amounts)
     min_value = min(case_amounts)
     max_value = max(case_amounts)
-    label = industry.replace("_", " ").title()
+
+    default_intro = (
+        "Based on {count} anonymized {industry_label} cases "
+        "in the synced private knowledge base:"
+    )
+    intro_template = cfg.get("benchmark_result_intro") or default_intro
+    intro = _safe_template(
+        intro_template,
+        count=count,
+        industry=industry,
+        industry_label=industry_label,
+        minimum=minimum_cases,
+        plural="s" if count != 1 else "",
+    )
+
+    default_footer = (
+        "This is an aggregate internal benchmark only.\n"
+        "Individual business names, identities, source files, "
+        "and record-level amounts are not disclosed."
+    )
+    footer = cfg.get("benchmark_result_footer") or default_footer
 
     return "\n".join(
         [
-            f"Based on {len(case_amounts)} anonymized {label} cases in the synced private knowledge base:",
+            intro,
             "",
             f"Average setup/startup budget: {_format_price(avg_value, 'BHD')}",
             f"Median setup/startup budget: {_format_price(median_value, 'BHD')}",
             f"Observed range: {_format_price(min_value, 'BHD')} to {_format_price(max_value, 'BHD')}",
             "",
-            "This is an aggregate internal benchmark only.",
-            "Individual business names, identities, source files, and record-level amounts are not disclosed.",
+            str(footer).strip(),
         ]
     )
 
@@ -1037,7 +1092,7 @@ async def answer_chat(
     # Logged-in clients/admins can request anonymized aggregate benchmarks
     # from synced private Google Drive knowledge.
     if client_logged_in and _wants_anonymized_benchmark(message):
-        benchmark_answer = _build_anonymized_benchmark_answer(message)
+        benchmark_answer = _build_anonymized_benchmark_answer(message, cfg)
         if benchmark_answer:
             answer = benchmark_answer
             recommended = []
