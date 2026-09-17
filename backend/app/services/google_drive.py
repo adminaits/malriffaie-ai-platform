@@ -1,5 +1,6 @@
 import io
 import json
+import re
 import httpx
 from pypdf import PdfReader
 from app.db import supabase
@@ -14,6 +15,209 @@ DEFAULT_ALLOWED_MIME_TYPES = [
     "application/vnd.google-apps.document",
     "text/plain",
 ]
+
+
+INDUSTRY_ALIASES = {
+    "healthcare": [
+        "healthcare",
+        "health care",
+        "medical",
+        "clinic",
+        "home care",
+        "homecare",
+        "nursing",
+        "wellness",
+        "patient care",
+    ],
+    "salon": [
+        "salon",
+        "beauty salon",
+        "beauty business",
+        "spa",
+        "hair salon",
+        "nail salon",
+        "hairdresser",
+        "beauty center",
+        "beauty centre",
+    ],
+    "cafe": [
+        "cafe",
+        "café",
+        "coffee shop",
+        "coffeeshop",
+        "restaurant",
+        "food business",
+        "coffee business",
+    ],
+    "construction": [
+        "construction",
+        "contracting",
+        "contractor",
+        "building materials",
+        "civil works",
+        "fit out",
+        "fit-out",
+    ],
+}
+
+
+BENCHMARK_LABELS = [
+    "startup budget",
+    "start-up budget",
+    "setup budget",
+    "set up budget",
+    "startup cost",
+    "start-up cost",
+    "setup cost",
+    "set up cost",
+    "initial investment",
+    "total investment",
+    "investment required",
+    "required investment",
+    "capital required",
+    "required capital",
+    "total project cost",
+    "project cost",
+    "estimated project cost",
+    "estimated setup cost",
+    "estimated startup cost",
+]
+
+
+def _normalise_search_text(value) -> str:
+    return re.sub(r"\s+", " ", str(value or "").lower()).strip()
+
+
+def _detect_industry(file_name: str | None, content: str) -> str | None:
+    """
+    Detect a broad business industry from the Drive filename + extracted content.
+
+    The result is only a retrieval tag. It is not shown to clients as a source name.
+    """
+    file_text = _normalise_search_text(file_name)
+    content_text = _normalise_search_text(content)
+
+    scores = {}
+
+    for industry, terms in INDUSTRY_ALIASES.items():
+        score = 0
+
+        for term in terms:
+            term = term.lower()
+
+            if term in file_text:
+                # Filename is a strong signal.
+                score += 5
+
+            if term in content_text:
+                score += 1
+
+        if score > 0:
+            scores[industry] = score
+
+    if not scores:
+        return None
+
+    return max(scores, key=scores.get)
+
+
+def _extract_bhd_amounts(text: str) -> list[float]:
+    """
+    Extract explicit BHD/BD amounts only.
+
+    We deliberately avoid treating every bare number as a budget because synced
+    files may contain dates, quantities, salaries, percentages, and other values.
+    """
+    value = str(text or "")
+    amounts = []
+
+    patterns = [
+        r"(?i)(?:BHD|BD|B\.D\.|د\.ب)\s*([0-9][0-9,]*(?:\.[0-9]+)?)",
+        r"(?i)([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:BHD|BD|B\.D\.|د\.ب)",
+    ]
+
+    for pattern in patterns:
+        for match in re.findall(pattern, value):
+            try:
+                amount = float(str(match).replace(",", ""))
+                if amount > 0:
+                    amounts.append(amount)
+            except Exception:
+                continue
+
+    return amounts
+
+
+def _extract_benchmark_amount(content: str) -> tuple[float | None, str | None]:
+    """
+    Extract one high-confidence setup/startup/investment figure from a document.
+
+    Only amounts appearing on lines with explicit setup/investment labels are used.
+    This avoids accidentally benchmarking salaries, rent, monthly expenses, etc.
+    """
+    lines = [line.strip() for line in str(content or "").splitlines() if line.strip()]
+    candidates = []
+
+    for line in lines:
+        low = line.lower()
+
+        matched_label = next(
+            (label for label in BENCHMARK_LABELS if label in low),
+            None,
+        )
+
+        if not matched_label:
+            continue
+
+        amounts = _extract_bhd_amounts(line)
+
+        for amount in amounts:
+            candidates.append((amount, matched_label))
+
+    if not candidates:
+        return None, None
+
+    # Prefer the largest explicitly labelled total/setup/investment value in a file.
+    # This is usually safer than using line-item expenses.
+    amount, matched_label = max(candidates, key=lambda item: item[0])
+    return amount, matched_label
+
+
+def _build_benchmark_metadata(
+    file: dict,
+    content: str,
+    access_level: str,
+    internal_company_wiki: bool,
+) -> dict:
+    """
+    Build privacy-safe metadata used later by rag.py for anonymous benchmarking.
+
+    The file name remains stored for admin traceability, but rag.py should never
+    expose it in benchmark responses.
+    """
+    file_name = file.get("name")
+    industry = _detect_industry(file_name, content)
+    benchmark_amount, matched_label = _extract_benchmark_amount(content)
+
+    benchmark_enabled = bool(
+        internal_company_wiki
+        and access_level == "private"
+        and industry
+        and benchmark_amount is not None
+    )
+
+    metadata = {
+        "industry": industry,
+        "dataset": industry,
+        "benchmark_enabled": benchmark_enabled,
+        "benchmark_metric": "startup_budget" if benchmark_amount is not None else None,
+        "benchmark_amount": benchmark_amount,
+        "benchmark_currency": "BHD" if benchmark_amount is not None else None,
+        "benchmark_source_label": matched_label,
+        "benchmark_anonymized": True if benchmark_enabled else False,
+    }
+
+    return metadata
 
 
 def _clean_value(value):
@@ -493,6 +697,13 @@ async def insert_knowledge_chunks_from_drive_file(
     internal_company_wiki = bool(internal_company_wiki)
     access_level = _normalise_access_level(access_level, internal_company_wiki)
 
+    benchmark_metadata = _build_benchmark_metadata(
+        file=file,
+        content=content,
+        access_level=access_level,
+        internal_company_wiki=internal_company_wiki,
+    )
+
     await delete_existing_knowledge_for_file(source_id)
 
     chunks = chunk_text(content)
@@ -515,6 +726,14 @@ async def insert_knowledge_chunks_from_drive_file(
                 "total_chunks": len(chunks),
                 "access_level": access_level,
                 "internal_company_wiki": internal_company_wiki,
+                "industry": benchmark_metadata.get("industry"),
+                "dataset": benchmark_metadata.get("dataset"),
+                "benchmark_enabled": benchmark_metadata.get("benchmark_enabled", False),
+                "benchmark_metric": benchmark_metadata.get("benchmark_metric"),
+                "benchmark_amount": benchmark_metadata.get("benchmark_amount"),
+                "benchmark_currency": benchmark_metadata.get("benchmark_currency"),
+                "benchmark_source_label": benchmark_metadata.get("benchmark_source_label"),
+                "benchmark_anonymized": benchmark_metadata.get("benchmark_anonymized", False),
             },
         }
 
@@ -597,6 +816,7 @@ async def sync_google_drive_widget(widget: dict) -> dict:
         }
 
     synced_files = 0
+    benchmark_tagged_files = 0
     skipped_files = 0
     total_chunks = 0
     skipped_details = []
@@ -630,6 +850,13 @@ async def sync_google_drive_widget(widget: dict) -> dict:
             })
             continue
 
+        file_benchmark_metadata = _build_benchmark_metadata(
+            file=file,
+            content=content,
+            access_level=access_level,
+            internal_company_wiki=internal_company_wiki,
+        )
+
         chunks_inserted = await insert_knowledge_chunks_from_drive_file(
             file,
             content,
@@ -638,6 +865,8 @@ async def sync_google_drive_widget(widget: dict) -> dict:
         )
 
         if chunks_inserted > 0:
+            if file_benchmark_metadata.get("benchmark_enabled"):
+                benchmark_tagged_files += 1
             synced_files += 1
             total_chunks += chunks_inserted
         else:
@@ -654,10 +883,12 @@ async def sync_google_drive_widget(widget: dict) -> dict:
         "ok": True,
         "message": (
             f"Google Drive sync completed. "
-            f"{synced_files} files synced, {total_chunks} knowledge chunks created."
+            f"{synced_files} files synced, {total_chunks} knowledge chunks created. "
+            f"{benchmark_tagged_files} files tagged for anonymized benchmarking."
         ),
         "folder_ids_used": folder_ids,
         "synced_files": synced_files,
+        "benchmark_tagged_files": benchmark_tagged_files,
         "skipped_files": skipped_files,
         "total_files_found": len(files),
         "total_chunks": total_chunks,
