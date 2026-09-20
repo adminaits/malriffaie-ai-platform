@@ -382,6 +382,38 @@ def recommend_products(message: str, products: list[dict]) -> list[dict]:
     return products[:3]
 
 
+
+def _is_greeting(message: str) -> bool:
+    """Handle simple greetings locally without calling the external AI model."""
+    low = (message or "").lower().strip()
+    cleaned = low.strip(" .,!?:;؟،")
+
+    greetings = {
+        "hi",
+        "hello",
+        "hey",
+        "hiya",
+        "good morning",
+        "good afternoon",
+        "good evening",
+        "morning",
+        "afternoon",
+        "evening",
+        "السلام عليكم",
+        "سلام",
+        "مرحبا",
+        "مرحباً",
+        "هلا",
+        "اهلا",
+        "أهلا",
+        "اهلين",
+        "أهلين",
+    }
+
+    return cleaned in greetings
+
+
+
 def _wants_product_list(message: str) -> bool:
     low = (message or "").lower().strip()
 
@@ -1085,13 +1117,24 @@ async def answer_chat(
         include_private=client_logged_in,
     )
 
-    recommended = recommend_products(message, ctx["products"])
+    # Start with no product recommendations. Products are only attached
+    # after a matching product or recommendation intent.
+    recommended = []
     answer = None
     used_knowledge = False
 
+    # 0. Greetings are answered locally from the editable Admin Dashboard greeting.
+    # Do not call Hugging Face and do not show product cards for greetings.
+    if _is_greeting(message):
+        answer = (
+            cfg.get("chat_greeting")
+            or "Hi! Welcome to Malriffaie AI Concierge. How can I help you today?"
+        )
+        recommended = []
+
     # Logged-in clients/admins can request anonymized aggregate benchmarks
     # from synced private Google Drive knowledge.
-    if client_logged_in and _wants_anonymized_benchmark(message):
+    elif client_logged_in and _wants_anonymized_benchmark(message):
         benchmark_answer = _build_anonymized_benchmark_answer(message, cfg)
         if benchmark_answer:
             answer = benchmark_answer
@@ -1215,10 +1258,10 @@ async def answer_chat(
                 max_tokens=cfg.get("max_tokens", 512),
                 timeout=cfg.get("timeout", 30),
             )
-        except Exception as exc:
+        except Exception:
             answer = (
                 cfg.get("fallback_message")
-                or f"I could not connect to the AI service right now. Please try again or contact support. Error: {str(exc)}"
+                or "I could not connect to the AI service right now. Please try again or contact support."
             )
 
         if (
@@ -1226,6 +1269,8 @@ async def answer_chat(
             or "AI is not configured" in answer
             or "AI connection exception" in answer
             or "No address associated with hostname" in answer
+            or "Name or service not known" in answer
+            or "Temporary failure in name resolution" in answer
         ):
             if ctx["knowledge"]:
                 first_context = ctx["knowledge"][0].get("content", "").strip()
