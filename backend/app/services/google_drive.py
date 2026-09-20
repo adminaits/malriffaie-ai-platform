@@ -648,23 +648,130 @@ async def download_drive_file_text(api_key: str, file: dict) -> dict:
             }
 
 
+def _normalise_extracted_text(text: str) -> str:
+    """
+    Clean common extraction artifacts while preserving paragraph structure.
+
+    This does not guess missing letters. It only normalizes whitespace and joins
+    obvious PDF line-wrap hyphenation such as "feasibi-\\nlity" -> "feasibility".
+    """
+    text = str(text or "")
+
+    # Join words broken by a PDF line-wrap hyphen.
+    text = re.sub(r"(?<=\\w)-\\s*\\n\\s*(?=\\w)", "", text)
+
+    # Normalize line endings.
+    text = text.replace("\\r\\n", "\\n").replace("\\r", "\\n")
+
+    # Trim spaces around line breaks.
+    text = re.sub(r"[ \\t]+\\n", "\\n", text)
+    text = re.sub(r"\\n[ \\t]+", "\\n", text)
+
+    # Collapse excessive blank lines but preserve paragraphs.
+    text = re.sub(r"\\n{3,}", "\\n\\n", text)
+
+    return text.strip()
+
+
+def _split_long_paragraph(paragraph: str, max_chars: int) -> list[str]:
+    """
+    Split an oversized paragraph on sentence boundaries first, then words.
+    Never intentionally cut through a word.
+    """
+    paragraph = paragraph.strip()
+
+    if not paragraph:
+        return []
+
+    if len(paragraph) <= max_chars:
+        return [paragraph]
+
+    sentence_parts = re.split(r"(?<=[.!?؟])\\s+", paragraph)
+    chunks = []
+    current = ""
+
+    for sentence in sentence_parts:
+        sentence = sentence.strip()
+
+        if not sentence:
+            continue
+
+        candidate = f"{current} {sentence}".strip()
+
+        if len(candidate) <= max_chars:
+            current = candidate
+            continue
+
+        if current:
+            chunks.append(current)
+            current = ""
+
+        if len(sentence) > max_chars:
+            words = sentence.split()
+            buffer = ""
+
+            for word in words:
+                word_candidate = f"{buffer} {word}".strip()
+
+                if len(word_candidate) <= max_chars:
+                    buffer = word_candidate
+                else:
+                    if buffer:
+                        chunks.append(buffer)
+                    buffer = word
+
+            if buffer:
+                current = buffer
+        else:
+            current = sentence
+
+    if current:
+        chunks.append(current)
+
+    return chunks
+
+
 def chunk_text(text: str, max_chars: int = 3500) -> list[str]:
-    text = (text or "").strip()
+    """
+    Build chunks without cutting words in half.
+
+    Preferred order:
+    1. Preserve paragraph boundaries.
+    2. Split oversized paragraphs on sentence boundaries.
+    3. Split only by complete words as a last resort.
+    """
+    text = _normalise_extracted_text(text)
 
     if not text:
         return []
 
+    paragraphs = [
+        " ".join(paragraph.split())
+        for paragraph in re.split(r"\\n\\s*\\n", text)
+        if paragraph.strip()
+    ]
+
     chunks = []
-    start = 0
+    current = ""
 
-    while start < len(text):
-        end = start + max_chars
-        chunk = text[start:end].strip()
+    for paragraph in paragraphs:
+        paragraph_parts = _split_long_paragraph(paragraph, max_chars)
 
-        if chunk:
-            chunks.append(chunk)
+        for part in paragraph_parts:
+            if not current:
+                current = part
+                continue
 
-        start = end
+            candidate = f"{current}\\n\\n{part}"
+
+            if len(candidate) <= max_chars:
+                current = candidate
+            else:
+                chunks.append(current.strip())
+                current = part
+
+    if current:
+        chunks.append(current.strip())
 
     return chunks
 
@@ -836,7 +943,7 @@ async def sync_google_drive_widget(widget: dict) -> dict:
             continue
 
         download_result = await download_drive_file_text(api_key, file)
-        content = download_result.get("text", "")
+        content = _normalise_extracted_text(download_result.get("text", ""))
         download_error = download_result.get("error")
 
         if not content:
