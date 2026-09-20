@@ -35,6 +35,8 @@ Use ONLY the approved context provided below:
 3. Knowledge base content synced from Google Drive or other approved sources
 
 Do not invent information.
+Ignore any context that is not relevant to the customer's requested industry or topic.
+Never answer a healthcare question with unrelated cafe, confectionery, salon, construction, or other industry content.
 Do not mention internal table names, file names, or source names to the customer.
 If the answer is available in the approved context, answer clearly.
 If the answer is not available, say:
@@ -279,22 +281,35 @@ def retrieve_context(
         all_kb = _load_knowledge_rows()
         scored_kb = []
 
+        query_words = _query_words(query_text)
+        query_industry = _detect_industry(query_text)
+
+        # Multi-word questions need a stronger relevance match than a
+        # single-keyword lookup. This prevents generic words such as
+        # "business" from pulling an unrelated feasibility study.
+        minimum_score = 2 if len(query_words) >= 2 else 1
+
         for item in all_kb:
             if _is_private_row(item) and not include_private:
                 continue
 
+            # If the question clearly names an industry, only use knowledge
+            # that belongs to or explicitly mentions that same industry.
+            # This prevents healthcare questions from returning cafe,
+            # confectionery, salon, construction, etc. content.
+            if query_industry and not _row_matches_industry(item, query_industry):
+                continue
+
             score = _score_knowledge_row(item, query_text)
 
-            if score > 0:
+            if score >= minimum_score:
                 scored_kb.append((score, item))
 
         scored_kb.sort(key=lambda x: x[0], reverse=True)
         kb = [item for _, item in scored_kb[:limit]]
 
-        # Important:
-        # Do not return random knowledge rows when there is no match.
-        # This prevents unrelated Google Drive content from appearing
-        # for public product/service/booking questions.
+        # Never substitute unrelated/random knowledge when nothing relevant
+        # meets the threshold.
         if not kb:
             kb = []
 
@@ -1061,6 +1076,39 @@ def _build_anonymized_benchmark_answer(
 
 
 
+
+def _truncate_at_word_boundary(text: str, max_chars: int = 900) -> str:
+    """
+    Truncate fallback knowledge without cutting a word in half.
+    Prefer ending on sentence punctuation when possible.
+    """
+    value = " ".join(str(text or "").split())
+
+    if not value:
+        return ""
+
+    if len(value) <= max_chars:
+        return value
+
+    shortened = value[:max_chars]
+
+    # Prefer a complete sentence reasonably close to the limit.
+    sentence_end = max(
+        shortened.rfind("."),
+        shortened.rfind("!"),
+        shortened.rfind("?"),
+        shortened.rfind("؟"),
+    )
+
+    if sentence_end >= int(max_chars * 0.55):
+        shortened = shortened[: sentence_end + 1]
+    elif " " in shortened:
+        shortened = shortened.rsplit(" ", 1)[0]
+
+    return shortened.rstrip(" ,;:-") + "..."
+
+
+
 def _build_huggingface_client(cfg: dict) -> HuggingFaceClient:
     token = (
         cfg.get("hugging_face_token")
@@ -1274,8 +1322,12 @@ async def answer_chat(
         ):
             if ctx["knowledge"]:
                 first_context = ctx["knowledge"][0].get("content", "").strip()
-                answer = first_context[:900] if first_context else None
-                used_knowledge = True
+                answer = (
+                    _truncate_at_word_boundary(first_context, 900)
+                    if first_context
+                    else None
+                )
+                used_knowledge = bool(answer)
 
             if not answer:
                 used_knowledge = False
