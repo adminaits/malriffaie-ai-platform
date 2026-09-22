@@ -833,16 +833,205 @@ def _detect_industry(message: str) -> str | None:
     low = (message or "").lower()
 
     aliases = {
-        "healthcare": ["healthcare", "health care", "medical", "clinic", "home care", "homecare", "nursing", "wellness"],
-        "salon": ["salon", "beauty salon", "beauty business", "spa", "hair salon", "nail salon"],
-        "cafe": ["cafe", "coffee shop", "coffeeshop", "restaurant", "food business"],
-        "construction": ["construction", "contracting", "contractor", "building materials"],
+        "healthcare": ["healthcare", "health care", "medical", "clinic", "medical center", "medical centre", "home care", "homecare", "nursing", "wellness", "pharmacy", "dental", "physiotherapy", "laboratory", "lab"],
+        "salon": ["salon", "beauty salon", "beauty business", "beauty center", "beauty centre", "spa", "hair salon", "nail salon", "barbershop", "barber shop", "massage center", "massage centre"],
+        "hotel": ["hotel", "hotels", "boutique hotel", "resort", "guest house", "guesthouse", "hospitality", "serviced apartment", "serviced apartments"],
+        "cafe": ["cafe", "café", "coffee shop", "coffeeshop", "restaurant", "food business", "bakery", "cloud kitchen", "kiosk", "takeaway"],
+        "construction": ["construction", "contracting", "contractor", "building materials", "fit out", "fit-out", "civil works"],
+        "retail": ["retail", "retail shop", "store", "shop", "boutique", "ecommerce", "e-commerce", "online store"],
+        "education": ["education", "school", "nursery", "training center", "training centre", "academy", "institute", "learning center", "learning centre"],
+        "gym": ["gym", "fitness", "fitness center", "fitness centre", "sports center", "sports centre", "health club"],
     }
 
     for industry, terms in aliases.items():
         if any(term in low for term in terms):
             return industry
 
+    return None
+
+
+
+BUSINESS_INTAKE_QUESTIONS = {
+    "healthcare": [
+        "What is your approximate budget for this healthcare business?",
+        "Which country, city, or area are you planning to establish it in?",
+        "What type of healthcare business are you considering, such as a clinic, medical center, home care center, wellness center, pharmacy, dental clinic, or another type?",
+        "Do you have previous experience in healthcare or a related field?",
+        "Will this be a startup from scratch, or do you already have an existing healthcare business?",
+        "Have you already checked the main healthcare licensing or regulatory requirements for the location?",
+    ],
+    "salon": [
+        "What is your approximate budget for the salon or beauty business?",
+        "Which country, city, or area are you planning to open it in?",
+        "What type of beauty business are you considering, such as a ladies salon, nail salon, spa, hair salon, massage center, or another concept?",
+        "What services do you plan to offer?",
+        "What approximate size, number of chairs, rooms, or treatment stations are you considering?",
+        "Do you already have experience or an existing customer base in the beauty industry?",
+        "Will this be a new startup or an expansion of an existing business?",
+    ],
+    "hotel": [
+        "What is your approximate investment budget?",
+        "Which country, city, or area are you considering for the hotel?",
+        "What type or category of hotel are you planning, such as budget, boutique, serviced apartments, resort, 3-star, 4-star, or another concept?",
+        "Approximately how many rooms or units are you considering?",
+        "Do you already own or lease the property, or are you still searching for a location?",
+        "Who is your main target customer, such as tourists, business travelers, families, long-stay guests, or another segment?",
+        "Will this be a new project or an existing hospitality business?",
+    ],
+    "cafe": [
+        "What is your approximate budget?",
+        "Which country, city, or area are you planning to operate in?",
+        "Are you planning a café, restaurant, takeaway, kiosk, bakery, cloud kitchen, or another food concept?",
+        "Will the business have seating, or will it mainly be takeaway and delivery?",
+        "What food or beverage concept are you planning?",
+        "Who is your main target customer?",
+        "Will this be a startup from scratch or an existing operation?",
+    ],
+    "construction": [
+        "What is your approximate startup or working-capital budget?",
+        "Which country or area will the business operate in?",
+        "What type of construction or contracting work will you focus on?",
+        "Will you work mainly on residential, commercial, industrial, fit-out, maintenance, or another type of project?",
+        "Do you already have engineers, supervisors, labor, equipment, or supplier relationships?",
+        "Do you have previous construction or project-management experience?",
+        "Will this be a new company or an expansion of an existing business?",
+    ],
+    "retail": [
+        "What is your approximate budget?",
+        "Which country, city, or area are you planning to operate in?",
+        "What products do you plan to sell?",
+        "Will the business be a physical store, online store, or both?",
+        "Who is your main target customer?",
+        "Do you already have suppliers or brands selected?",
+        "Will this be a new startup or an existing retail business?",
+    ],
+    "education": [
+        "What is your approximate budget?",
+        "Which country, city, or area are you planning to operate in?",
+        "What type of education business are you considering, such as a nursery, school, academy, training center, or institute?",
+        "What age group or customer segment will you serve?",
+        "Do you already have a suitable premises or are you still looking for one?",
+        "Do you have previous experience in education or training?",
+        "Have you reviewed the main licensing or accreditation requirements?",
+    ],
+    "gym": [
+        "What is your approximate budget?",
+        "Which country, city, or area are you planning to operate in?",
+        "What type of fitness business are you considering, such as a general gym, boutique studio, ladies gym, personal-training studio, or sports center?",
+        "What approximate size or member capacity are you planning for?",
+        "What equipment or services do you expect to provide?",
+        "Do you have previous fitness-industry experience or an existing customer base?",
+        "Will this be a new startup or an expansion of an existing business?",
+    ],
+}
+
+BUSINESS_INDUSTRY_LABELS = {
+    "healthcare": "healthcare",
+    "salon": "beauty and salon",
+    "hotel": "hotel and hospitality",
+    "cafe": "café and food",
+    "construction": "construction and contracting",
+    "retail": "retail",
+    "education": "education and training",
+    "gym": "fitness",
+}
+
+
+def _wants_business_start_guidance(message: str) -> bool:
+    low = (message or "").lower().strip()
+    industry = _detect_industry(message)
+
+    if not industry:
+        return False
+
+    start_terms = [
+        "start a business", "start business", "starting a business", "start the business",
+        "starting the business", "set up a business", "setup a business", "set up the business",
+        "setup the business", "open a business", "open business", "open the business",
+        "business idea", "business opportunity", "want to start", "planning to start",
+        "plan to start", "thinking to start", "thinking about starting", "know about",
+        "know more about", "learn about", "interested in starting", "interested to start",
+        "how to start", "what do i need to start", "what is needed to start",
+        "new venture", "new business",
+    ]
+
+    return any(term in low for term in start_terms)
+
+
+def _business_start_intake_answer(message: str) -> str:
+    industry = _detect_industry(message)
+    industry_label = BUSINESS_INDUSTRY_LABELS.get(
+        industry,
+        (industry or "business").replace("_", " ")
+    )
+
+    questions = BUSINESS_INTAKE_QUESTIONS.get(
+        industry,
+        [
+            "What is your approximate budget?",
+            "Which country, city, or area are you planning to operate in?",
+            "What specific type of business or concept are you considering?",
+            "Who is your main target customer?",
+            "Do you have previous experience in this sector?",
+            "Will this be a startup from scratch or an existing business?",
+        ],
+    )
+
+    lines = [
+        f"Malriffaie Support is happy to assist you with your new venture in the {industry_label} industry.",
+        "",
+        "To give you the most relevant guidance using suitable market information and anonymized insights from similar projects, could you please share:",
+        "",
+    ]
+    lines.extend([f"• {question}" for question in questions])
+    lines.extend([
+        "",
+        "Once I have these details, I can guide you more accurately on setup requirements, likely investment, operations, risks, and relevant opportunities for this type of business.",
+    ])
+    return "\n".join(lines)
+
+
+def _load_recent_conversation(visitor_id: str | None, limit: int = 6) -> list[dict]:
+    if not visitor_id:
+        return []
+
+    try:
+        rows = (
+            supabase
+            .table("chat_messages")
+            .select("message,response,created_at")
+            .eq("visitor_id", visitor_id)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+            .data
+            or []
+        )
+        return list(reversed(rows))
+    except Exception:
+        return []
+
+
+def _conversation_to_prompt(rows: list[dict]) -> str:
+    lines = []
+    for row in rows:
+        customer_message = str(row.get("message") or "").strip()
+        assistant_response = str(row.get("response") or "").strip()
+
+        if customer_message:
+            lines.append(f"Customer: {customer_message}")
+        if assistant_response:
+            lines.append(f"Assistant: {assistant_response}")
+
+    return "\n".join(lines)
+
+
+def _recent_business_industry(rows: list[dict]) -> str | None:
+    for row in reversed(rows):
+        for value in [row.get("message"), row.get("response")]:
+            industry = _detect_industry(str(value or ""))
+            if industry:
+                return industry
     return None
 
 
@@ -865,10 +1054,14 @@ def _row_matches_industry(row: dict, industry: str) -> bool:
             return True
 
     terms_map = {
-        "healthcare": ["healthcare", "health care", "medical", "clinic", "home care", "homecare", "nursing", "wellness"],
-        "salon": ["salon", "beauty", "spa", "hair", "nail"],
-        "cafe": ["cafe", "coffee", "restaurant", "food"],
-        "construction": ["construction", "contracting", "contractor", "building materials"],
+        "healthcare": ["healthcare", "health care", "medical", "clinic", "home care", "homecare", "nursing", "wellness", "pharmacy", "dental"],
+        "salon": ["salon", "beauty", "spa", "hair", "nail", "barber", "massage"],
+        "hotel": ["hotel", "hospitality", "resort", "guest house", "guesthouse", "serviced apartment"],
+        "cafe": ["cafe", "café", "coffee", "restaurant", "food", "bakery", "cloud kitchen", "takeaway"],
+        "construction": ["construction", "contracting", "contractor", "building materials", "fit out", "fit-out", "civil works"],
+        "retail": ["retail", "store", "shop", "boutique", "ecommerce", "e-commerce"],
+        "education": ["education", "school", "nursery", "training", "academy", "institute"],
+        "gym": ["gym", "fitness", "sports center", "sports centre", "health club"],
     }
 
     return any(term in content or term in meta_text for term in terms_map.get(industry, [industry]))
@@ -1165,6 +1358,12 @@ async def answer_chat(
         include_private=client_logged_in,
     )
 
+    recent_conversation = (
+        _load_recent_conversation(visitor_id)
+        if client_logged_in
+        else []
+    )
+
     # Start with no product recommendations. Products are only attached
     # after a matching product or recommendation intent.
     recommended = []
@@ -1188,6 +1387,11 @@ async def answer_chat(
             answer = benchmark_answer
             recommended = []
             used_knowledge = False
+
+    elif client_logged_in and _wants_business_start_guidance(message):
+        answer = _business_start_intake_answer(message)
+        recommended = []
+        used_knowledge = False
 
     # 1. Service-list/service-description questions.
     # This must be checked before product recommendation logic.
@@ -1294,6 +1498,24 @@ async def answer_chat(
             [k.get("content", "")[:1200] for k in ctx["knowledge"]]
         )
 
+        recent_prompt = _conversation_to_prompt(recent_conversation)
+        recent_industry = _recent_business_industry(recent_conversation)
+
+        if recent_prompt:
+            prompt += "\n\nRecent conversation:\n" + recent_prompt
+
+        if recent_industry:
+            prompt += (
+                f"\n\nCurrent business topic from the recent conversation: "
+                f"{BUSINESS_INDUSTRY_LABELS.get(recent_industry, recent_industry)}."
+            )
+
+        prompt += (
+            "\n\nConversation rule: If the customer's current message is a short follow-up "
+            "such as 'yes', 'yes please', 'continue', 'okay', or similar, interpret it using "
+            "the recent conversation instead of searching unrelated knowledge."
+        )
+
         prompt += f"\n\nCustomer message: {message}\nAnswer:"
 
         hf = _build_huggingface_client(cfg)
@@ -1320,21 +1542,11 @@ async def answer_chat(
             or "Name or service not known" in answer
             or "Temporary failure in name resolution" in answer
         ):
-            if ctx["knowledge"]:
-                first_context = ctx["knowledge"][0].get("content", "").strip()
-                answer = (
-                    _truncate_at_word_boundary(first_context, 900)
-                    if first_context
-                    else None
-                )
-                used_knowledge = bool(answer)
-
-            if not answer:
-                used_knowledge = False
-                answer = (
-                    cfg.get("fallback_message")
-                    or "I do not have that information yet. I can arrange a human handoff for you."
-                )
+            used_knowledge = False
+            answer = (
+                cfg.get("fallback_message")
+                or "I could not process the relevant business information properly right now. Please try again shortly or contact Malriffaie Support."
+            )
 
     if visitor_id:
         try:
