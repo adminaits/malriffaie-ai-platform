@@ -984,9 +984,14 @@ def _business_assessment_search_query(assessment: dict) -> str:
     """
     Build a focused retrieval query from structured client answers.
     """
+    industry = assessment.get("industry")
+    business_type = assessment.get("business_type")
+
     values = [
-        assessment.get("industry"),
-        assessment.get("business_type"),
+        industry,
+        industry,
+        business_type,
+        business_type,
         assessment.get("country"),
         assessment.get("city_area"),
         assessment.get("business_stage"),
@@ -1520,7 +1525,15 @@ async def answer_chat(
         and not assessment
         and _wants_business_start_guidance(message)
     ):
-        answer = _business_start_intake_answer(message)
+        # The logged-in client dashboard now uses a structured Business Assessment
+        # form. Do not send the old multi-question intake list from the backend.
+        # This response is also a safe fallback for older frontend builds.
+        answer = (
+            "To give you accurate business guidance, please complete the "
+            "Business Assessment form in your Client Dashboard. "
+            "Once submitted, I will use your answers together with relevant "
+            "anonymized knowledge from similar projects."
+        )
         recommended = []
         used_knowledge = False
 
@@ -1642,7 +1655,9 @@ async def answer_chat(
                 "4. Summarize relevant setup, licensing, staffing, operational, market, and financial considerations found in the approved context.\n"
                 "5. Use anonymized aggregate or generalized insights only. Never reveal business names, client identities, source file names, source IDs, or individual confidential figures.\n"
                 "6. If there is not enough relevant knowledge for a conclusion, say that clearly.\n"
-                "7. Finish with practical next steps and any important follow-up information still needed."
+                "7. Finish with practical next steps and any important follow-up information still needed.\n"
+                "8. Do not ask the client to repeat information already supplied in the structured assessment.\n"
+                "9. If relevant knowledge exists, summarize it into a useful advisory response rather than reproducing raw document text."
             )
 
         recent_prompt = _conversation_to_prompt(recent_conversation)
