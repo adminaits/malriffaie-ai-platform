@@ -1585,6 +1585,114 @@ function BusinessAssessmentForm({ onSubmit, loading }) {
   );
 }
 
+
+function shouldOpenBusinessAssessment(message) {
+  const low = String(message || '')
+    .toLowerCase()
+    .replace(/[?.,!]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const industryTerms = [
+    'healthcare',
+    'health care',
+    'medical',
+    'clinic',
+    'home care',
+    'homecare',
+    'wellness',
+    'pharmacy',
+    'dental',
+    'salon',
+    'beauty',
+    'spa',
+    'hotel',
+    'hospitality',
+    'resort',
+    'cafe',
+    'café',
+    'restaurant',
+    'bakery',
+    'construction',
+    'contracting',
+    'retail',
+    'shop',
+    'store',
+    'education',
+    'school',
+    'nursery',
+    'training center',
+    'academy',
+    'gym',
+    'fitness'
+  ];
+
+  const businessTerms = [
+    'business',
+    'buissness',
+    'buisness',
+    'startup',
+    'start',
+    'starting',
+    'setup',
+    'set up',
+    'open',
+    'venture',
+    'industry',
+    'idea'
+  ];
+
+  const intentTerms = [
+    'can i know',
+    'want to know',
+    'know about',
+    'tell me about',
+    'learn about',
+    'interested in',
+    'thinking about',
+    'planning',
+    'plan to',
+    'how to',
+    'want to start',
+    'start a',
+    'start the'
+  ];
+
+  const hasIndustry = industryTerms.some(term => low.includes(term));
+  const hasBusiness = businessTerms.some(term => low.includes(term));
+  const hasIntent = intentTerms.some(term => low.includes(term));
+
+  const generalBusinessPhrases = [
+    'start a business',
+    'start business',
+    'starting a business',
+    'start the business',
+    'set up a business',
+    'setup a business',
+    'business setup',
+    'open a business',
+    'new business',
+    'business idea',
+    'business opportunity',
+    'know about business',
+    'know more about business',
+    'tell me about business',
+    'learn about business',
+    'how to start a business',
+    'want to start a business',
+    'planning to start a business'
+  ];
+
+  const hasGeneralBusinessIntent = generalBusinessPhrases.some(
+    phrase => low.includes(phrase)
+  );
+
+  return (
+    (hasIndustry && (hasBusiness || hasIntent)) ||
+    hasGeneralBusinessIntent
+  );
+}
+
 function ClientDashboard() {
   const [client, setClient] = useState(null);
   const [authChecked, setAuthChecked] = useState(false);
@@ -1902,6 +2010,42 @@ function ClientDashboard() {
     if (!text || loading) return;
 
     setInput('');
+
+    // Logged-in client business/startup questions should open the structured
+    // Business Assessment form instead of immediately calling the AI.
+    if (shouldOpenBusinessAssessment(text)) {
+      const userMessage = {
+        role: 'user',
+        text,
+        created_at: new Date().toISOString()
+      };
+
+      const assistantMessage = {
+        role: 'assistant',
+        text: 'To give you accurate business guidance, please complete the Business Assessment form below. I will use your answers together with relevant anonymized knowledge from similar projects.',
+        products: [],
+        sources: [],
+        created_at: new Date().toISOString()
+      };
+
+      setMessages(current => {
+        const next = [...current, userMessage, assistantMessage];
+        saveCurrentConversation(next);
+        return next;
+      });
+
+      setShowBusinessAssessment(true);
+
+      setTimeout(() => {
+        document.querySelector('.clientBusinessAssessment')?.scrollIntoView({
+          behavior: 'smooth',
+          block: 'start'
+        });
+      }, 50);
+
+      return;
+    }
+
     await sendClientMessage(text);
   }
 
@@ -2066,7 +2210,7 @@ function ClientDashboard() {
         </section>
 
         {showBusinessAssessment && (
-          <section className="clientCards">
+          <section className="clientCards clientBusinessAssessment">
             <BusinessAssessmentForm
               onSubmit={submitBusinessAssessment}
               loading={loading}
