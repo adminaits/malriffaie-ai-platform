@@ -36,7 +36,9 @@ Use ONLY the approved context provided below:
 
 Do not invent information.
 Ignore any context that is not relevant to the customer's requested industry or topic.
-Never answer a healthcare question with unrelated cafe, confectionery, salon, construction, or other industry content.
+Never answer a question about one industry using knowledge from an unrelated industry.
+For structured business assessments, summarize only relevant approved knowledge and clearly separate supported findings from assumptions.
+Never expose business names, client identities, source file names, source IDs, or individual confidential figures from private knowledge.
 Do not mention internal table names, file names, or source names to the customer.
 If the answer is available in the approved context, answer clearly.
 If the answer is not available, say:
@@ -937,6 +939,118 @@ BUSINESS_INDUSTRY_LABELS = {
 }
 
 
+
+def _parse_business_assessment(message: str) -> dict | None:
+    """
+    Parse the structured assessment message sent by the logged-in client dashboard.
+
+    Expected format starts with:
+    [BUSINESS_ASSESSMENT]
+    """
+    text = str(message or "").strip()
+
+    if not text.startswith("[BUSINESS_ASSESSMENT]"):
+        return None
+
+    result = {}
+
+    for line in text.splitlines()[1:]:
+        if ":" not in line:
+            continue
+
+        key, value = line.split(":", 1)
+        key = (
+            key.strip()
+            .lower()
+            .replace(" / ", "_")
+            .replace("/", "_")
+            .replace(" ", "_")
+        )
+        value = value.strip()
+
+        if key and value:
+            result[key] = value
+
+    industry = str(result.get("industry") or "").strip().lower()
+
+    if not industry:
+        return None
+
+    result["industry"] = industry
+    return result
+
+
+def _business_assessment_search_query(assessment: dict) -> str:
+    """
+    Build a focused retrieval query from structured client answers.
+    """
+    values = [
+        assessment.get("industry"),
+        assessment.get("business_type"),
+        assessment.get("country"),
+        assessment.get("city_area"),
+        assessment.get("business_stage"),
+        assessment.get("target_customer"),
+        assessment.get("previous_experience"),
+    ]
+
+    return " ".join(
+        str(value).strip()
+        for value in values
+        if value
+        and str(value).strip().lower()
+        not in {"not specified", "none", "n/a", "na"}
+    )
+
+
+def _business_assessment_profile(assessment: dict) -> str:
+    """
+    Format the submitted assessment for the model prompt.
+    """
+    preferred_order = [
+        ("Industry", "industry_label"),
+        ("Business type", "business_type"),
+        ("Budget", "budget"),
+        ("Country", "country"),
+        ("City / area", "city_area"),
+        ("Previous experience", "previous_experience"),
+        ("Business stage", "business_stage"),
+        ("Target customer", "target_customer"),
+        ("Additional notes", "additional_notes"),
+    ]
+
+    lines = []
+
+    for label, key in preferred_order:
+        value = assessment.get(key)
+
+        if (
+            value
+            and str(value).strip().lower()
+            not in {"not specified", "none", "n/a", "na"}
+        ):
+            lines.append(f"- {label}: {value}")
+
+    ignored = {key for _, key in preferred_order} | {"industry"}
+
+    for key, value in assessment.items():
+        if key in ignored:
+            continue
+
+        if (
+            not value
+            or str(value).strip().lower()
+            in {"not specified", "none", "n/a", "na"}
+        ):
+            continue
+
+        label = key.replace("_", " ").strip().title()
+        lines.append(f"- {label}: {value}")
+
+    return "\n".join(lines)
+
+
+
 def _wants_business_start_guidance(message: str) -> bool:
     low = (message or "").lower().strip()
     industry = _detect_industry(message)
@@ -1351,10 +1465,23 @@ async def answer_chat(
 ) -> dict:
     cfg = _latest_ai_settings()
 
+    # Structured business assessment is accepted only for logged-in clients/admins.
+    assessment = (
+        _parse_business_assessment(message)
+        if client_logged_in
+        else None
+    )
+
+    retrieval_query = (
+        _business_assessment_search_query(assessment)
+        if assessment
+        else message
+    )
+
     # Public users get public knowledge only.
     # Logged-in clients/admins get public + private/internal wiki knowledge.
     ctx = retrieve_context(
-        message,
+        retrieval_query,
         include_private=client_logged_in,
     )
 
@@ -1388,7 +1515,11 @@ async def answer_chat(
             recommended = []
             used_knowledge = False
 
-    elif client_logged_in and _wants_business_start_guidance(message):
+    elif (
+        client_logged_in
+        and not assessment
+        and _wants_business_start_guidance(message)
+    ):
         answer = _business_start_intake_answer(message)
         recommended = []
         used_knowledge = False
@@ -1498,6 +1629,22 @@ async def answer_chat(
             [k.get("content", "")[:1200] for k in ctx["knowledge"]]
         )
 
+        if assessment:
+            prompt += "\n\nStructured client business assessment:\n"
+            prompt += _business_assessment_profile(assessment)
+
+            prompt += (
+                "\n\nBusiness assessment instructions:\n"
+                "1. Begin with a short summary of the client's business profile.\n"
+                "2. Use only approved knowledge relevant to the same industry and business type.\n"
+                "3. Assess the stated budget only where the approved context supports a comparison. "
+                "Do not guess a budget benchmark.\n"
+                "4. Summarize relevant setup, licensing, staffing, operational, market, and financial considerations found in the approved context.\n"
+                "5. Use anonymized aggregate or generalized insights only. Never reveal business names, client identities, source file names, source IDs, or individual confidential figures.\n"
+                "6. If there is not enough relevant knowledge for a conclusion, say that clearly.\n"
+                "7. Finish with practical next steps and any important follow-up information still needed."
+            )
+
         recent_prompt = _conversation_to_prompt(recent_conversation)
         recent_industry = _recent_business_industry(recent_conversation)
 
@@ -1543,10 +1690,33 @@ async def answer_chat(
             or "Temporary failure in name resolution" in answer
         ):
             used_knowledge = False
-            answer = (
-                cfg.get("fallback_message")
-                or "I could not process the relevant business information properly right now. Please try again shortly or contact Malriffaie Support."
-            )
+
+            if assessment:
+                relevant_cases = len(
+                    {
+                        row.get("source_id") or row.get("id")
+                        for row in ctx["knowledge"]
+                        if row.get("source_id") or row.get("id")
+                    }
+                )
+
+                answer = "\n".join(
+                    [
+                        "Your business assessment has been received.",
+                        "",
+                        _business_assessment_profile(assessment),
+                        "",
+                        f"I found {relevant_cases} relevant anonymized knowledge source"
+                        f"{'s' if relevant_cases != 1 else ''} for this business profile.",
+                        "",
+                        "The AI summarization service is temporarily unavailable, so I will not display raw or potentially unrelated source text. Please try the assessment again shortly or contact Malriffaie Support for a detailed review.",
+                    ]
+                )
+            else:
+                answer = (
+                    cfg.get("fallback_message")
+                    or "I could not process the relevant business information properly right now. Please try again shortly or contact Malriffaie Support."
+                )
 
     if visitor_id:
         try:
