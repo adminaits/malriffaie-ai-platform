@@ -637,10 +637,21 @@ def _matched_product(message: str, products: list[dict]) -> dict | None:
             if "marketing" in text:
                 return product
 
-    if "hr" in low or "manual" in low:
+    has_hr_intent = bool(
+        re.search(r"\bhr\b", low)
+        or "human resources" in low
+        or "hr manual" in low
+        or "employee manual" in low
+    )
+
+    if has_hr_intent or "manual" in low:
         for product in products:
             text = f"{product.get('name', '')} {product.get('description', '')}".lower()
-            if "hr" in text or "manual" in text:
+            if (
+                re.search(r"\bhr\b", text)
+                or "human resources" in text
+                or "manual" in text
+            ):
                 return product
 
     if "agreement" in low or "partnership" in low:
@@ -984,14 +995,9 @@ def _business_assessment_search_query(assessment: dict) -> str:
     """
     Build a focused retrieval query from structured client answers.
     """
-    industry = assessment.get("industry")
-    business_type = assessment.get("business_type")
-
     values = [
-        industry,
-        industry,
-        business_type,
-        business_type,
+        assessment.get("industry"),
+        assessment.get("business_type"),
         assessment.get("country"),
         assessment.get("city_area"),
         assessment.get("business_stage"),
@@ -1060,10 +1066,7 @@ def _wants_business_start_guidance(message: str) -> bool:
     low = (message or "").lower().strip()
     industry = _detect_industry(message)
 
-    if not industry:
-        return False
-
-    start_terms = [
+    industry_start_terms = [
         "start a business", "start business", "starting a business", "start the business",
         "starting the business", "set up a business", "setup a business", "set up the business",
         "setup the business", "open a business", "open business", "open the business",
@@ -1074,7 +1077,30 @@ def _wants_business_start_guidance(message: str) -> bool:
         "new venture", "new business",
     ]
 
-    return any(term in low for term in start_terms)
+    general_business_terms = [
+        "start a business",
+        "start business",
+        "starting a business",
+        "set up a business",
+        "setup a business",
+        "business setup",
+        "open a business",
+        "new business",
+        "business idea",
+        "business opportunity",
+        "know about business",
+        "know more about business",
+        "tell me about business",
+        "learn about business",
+        "how to start a business",
+        "want to start a business",
+        "planning to start a business",
+    ]
+
+    if any(term in low for term in general_business_terms):
+        return True
+
+    return bool(industry) and any(term in low for term in industry_start_terms)
 
 
 def _business_start_intake_answer(message: str) -> str:
@@ -1525,21 +1551,18 @@ async def answer_chat(
         and not assessment
         and _wants_business_start_guidance(message)
     ):
-        # The logged-in client dashboard now uses a structured Business Assessment
-        # form. Do not send the old multi-question intake list from the backend.
-        # This response is also a safe fallback for older frontend builds.
-        answer = (
-            "To give you accurate business guidance, please complete the "
-            "Business Assessment form in your Client Dashboard. "
-            "Once submitted, I will use your answers together with relevant "
-            "anonymized knowledge from similar projects."
-        )
+        answer = _business_start_intake_answer(message)
         recommended = []
         used_knowledge = False
 
+    # Structured business assessments must bypass all normal product/service
+    # routing. They are analyzed only by the assessment RAG/AI path below.
+    if assessment:
+        recommended = []
+
     # 1. Service-list/service-description questions.
     # This must be checked before product recommendation logic.
-    if answer is None and _wants_service_list(message):
+    elif answer is None and _wants_service_list(message):
         answer = _service_list_answer(ctx["services"])
         recommended = []
 
@@ -1655,9 +1678,7 @@ async def answer_chat(
                 "4. Summarize relevant setup, licensing, staffing, operational, market, and financial considerations found in the approved context.\n"
                 "5. Use anonymized aggregate or generalized insights only. Never reveal business names, client identities, source file names, source IDs, or individual confidential figures.\n"
                 "6. If there is not enough relevant knowledge for a conclusion, say that clearly.\n"
-                "7. Finish with practical next steps and any important follow-up information still needed.\n"
-                "8. Do not ask the client to repeat information already supplied in the structured assessment.\n"
-                "9. If relevant knowledge exists, summarize it into a useful advisory response rather than reproducing raw document text."
+                "7. Finish with practical next steps and any important follow-up information still needed."
             )
 
         recent_prompt = _conversation_to_prompt(recent_conversation)
@@ -1749,6 +1770,6 @@ async def answer_chat(
 
     return {
         "answer": answer,
-        "products": recommended,
+        "products": [] if assessment else recommended,
         "sources": ctx["knowledge"] if used_knowledge else [],
     }
