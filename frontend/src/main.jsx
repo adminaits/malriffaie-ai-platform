@@ -1200,6 +1200,391 @@ function ClientAuthPage({ mode='login' }) {
   </form></div>;
 }
 
+
+const BUSINESS_ASSESSMENT_CONFIG = {
+  healthcare: {
+    label: 'Healthcare',
+    typeLabel: 'Healthcare business type',
+    typeOptions: [
+      'Clinic',
+      'Medical Center',
+      'Home Care Center',
+      'Wellness Center',
+      'Pharmacy',
+      'Dental Clinic',
+      'Physiotherapy Center',
+      'Laboratory',
+      'Other'
+    ],
+    extraLabel: 'Licensing status',
+    extraOptions: [
+      'Not checked yet',
+      'Initial research completed',
+      'Application in progress',
+      'Licensing already approved'
+    ]
+  },
+
+  salon: {
+    label: 'Salon / Beauty',
+    typeLabel: 'Salon / beauty business type',
+    typeOptions: [
+      'Ladies Salon',
+      'Hair Salon',
+      'Nail Salon',
+      'Spa',
+      'Massage Center',
+      'Beauty Center',
+      'Barbershop',
+      'Other'
+    ],
+    extraLabel: 'Planned setup / capacity',
+    extraOptions: [
+      'Small setup',
+      'Medium setup',
+      'Large setup',
+      'Not decided yet'
+    ]
+  },
+
+  hotel: {
+    label: 'Hotel / Hospitality',
+    typeLabel: 'Hospitality business type',
+    typeOptions: [
+      'Budget Hotel',
+      'Boutique Hotel',
+      '3-Star Hotel',
+      '4-Star Hotel',
+      'Resort',
+      'Serviced Apartments',
+      'Guest House',
+      'Other'
+    ],
+    extraLabel: 'Property status',
+    extraOptions: [
+      'Property owned',
+      'Property leased',
+      'Searching for property',
+      'Not decided yet'
+    ]
+  },
+
+  cafe: {
+    label: 'Cafe / Restaurant / Food',
+    typeLabel: 'Food business type',
+    typeOptions: [
+      'Cafe',
+      'Restaurant',
+      'Takeaway',
+      'Kiosk',
+      'Bakery',
+      'Cloud Kitchen',
+      'Delivery Only',
+      'Other'
+    ],
+    extraLabel: 'Operating model',
+    extraOptions: [
+      'Dine-in',
+      'Takeaway',
+      'Delivery',
+      'Dine-in + Takeaway',
+      'Takeaway + Delivery',
+      'Not decided yet'
+    ]
+  },
+
+  construction: {
+    label: 'Construction / Contracting',
+    typeLabel: 'Construction business type',
+    typeOptions: [
+      'General Contracting',
+      'Residential Construction',
+      'Commercial Construction',
+      'Fit-out',
+      'Maintenance',
+      'Building Materials',
+      'Civil Works',
+      'Other'
+    ],
+    extraLabel: 'Main project focus',
+    extraOptions: [
+      'Residential',
+      'Commercial',
+      'Industrial',
+      'Mixed',
+      'Not decided yet'
+    ]
+  },
+
+  retail: {
+    label: 'Retail / E-commerce',
+    typeLabel: 'Retail business type',
+    typeOptions: [
+      'Physical Store',
+      'Online Store',
+      'Physical + Online',
+      'Boutique',
+      'Specialty Retail',
+      'Other'
+    ],
+    extraLabel: 'Supplier status',
+    extraOptions: [
+      'Suppliers selected',
+      'Some suppliers identified',
+      'Still searching',
+      'Not started'
+    ]
+  },
+
+  education: {
+    label: 'Education / Training',
+    typeLabel: 'Education business type',
+    typeOptions: [
+      'Nursery',
+      'School',
+      'Training Center',
+      'Academy',
+      'Institute',
+      'Learning Center',
+      'Other'
+    ],
+    extraLabel: 'Licensing / accreditation status',
+    extraOptions: [
+      'Not checked yet',
+      'Initial research completed',
+      'Application in progress',
+      'Approved'
+    ]
+  },
+
+  gym: {
+    label: 'Gym / Fitness',
+    typeLabel: 'Fitness business type',
+    typeOptions: [
+      'General Gym',
+      'Ladies Gym',
+      'Boutique Studio',
+      'Personal Training Studio',
+      'Sports Center',
+      'Other'
+    ],
+    extraLabel: 'Planned capacity',
+    extraOptions: [
+      'Small',
+      'Medium',
+      'Large',
+      'Not decided yet'
+    ]
+  }
+};
+
+
+function BusinessAssessmentForm({ onSubmit, loading }) {
+  const [form, setForm] = useState({
+    industry: 'healthcare',
+    business_type: '',
+    budget: '',
+    currency: 'BHD',
+    country: 'Bahrain',
+    city: '',
+    experience: 'No previous experience',
+    stage: 'Startup from scratch',
+    target_customer: '',
+    extra_status: '',
+    notes: ''
+  });
+
+  const config =
+    BUSINESS_ASSESSMENT_CONFIG[form.industry] ||
+    BUSINESS_ASSESSMENT_CONFIG.healthcare;
+
+  const set = (key, value) =>
+    setForm(current => ({ ...current, [key]: value }));
+
+  function changeIndustry(value) {
+    setForm(current => ({
+      ...current,
+      industry: value,
+      business_type: '',
+      extra_status: ''
+    }));
+  }
+
+  function submitAssessment(e) {
+    e.preventDefault();
+
+    if (
+      !form.industry ||
+      !form.business_type ||
+      !String(form.budget || '').trim() ||
+      !String(form.country || '').trim()
+    ) {
+      return;
+    }
+
+    onSubmit({
+      ...form,
+      industry_label: config.label,
+      extra_label: config.extraLabel
+    });
+  }
+
+  return (
+    <form className="clientInfoCard settingsForm" onSubmit={submitAssessment}>
+      <div>
+        <h3>Business Assessment</h3>
+        <p>
+          Complete this short form and the assistant will use your answers
+          together with relevant anonymized knowledge from similar business cases.
+        </p>
+      </div>
+
+      <Field label="Business industry">
+        <Select
+          value={form.industry}
+          onChange={changeIndustry}
+        >
+          {Object.entries(BUSINESS_ASSESSMENT_CONFIG).map(([key, item]) => (
+            <option key={key} value={key}>
+              {item.label}
+            </option>
+          ))}
+        </Select>
+      </Field>
+
+      <Field label={config.typeLabel}>
+        <Select
+          value={form.business_type}
+          onChange={v => set('business_type', v)}
+        >
+          <option value="">Select business type</option>
+
+          {config.typeOptions.map(option => (
+            <option key={option} value={option}>
+              {option}
+            </option>
+          ))}
+        </Select>
+      </Field>
+
+      <div className="grid2">
+        <Field label="Approximate budget">
+          <Text
+            type="number"
+            value={form.budget}
+            onChange={v => set('budget', v)}
+            placeholder="e.g. 30000"
+          />
+        </Field>
+
+        <Field label="Currency">
+          <Select
+            value={form.currency}
+            onChange={v => set('currency', v)}
+          >
+            <option value="BHD">BHD</option>
+            <option value="USD">USD</option>
+            <option value="SAR">SAR</option>
+            <option value="AED">AED</option>
+          </Select>
+        </Field>
+
+        <Field label="Country">
+          <Text
+            value={form.country}
+            onChange={v => set('country', v)}
+          />
+        </Field>
+
+        <Field label="City / area">
+          <Text
+            value={form.city}
+            onChange={v => set('city', v)}
+            placeholder="Optional"
+          />
+        </Field>
+      </div>
+
+      <Field label="Previous industry experience">
+        <Select
+          value={form.experience}
+          onChange={v => set('experience', v)}
+        >
+          <option value="No previous experience">
+            No previous experience
+          </option>
+          <option value="Some experience">
+            Some experience
+          </option>
+          <option value="Experienced in this industry">
+            Experienced in this industry
+          </option>
+          <option value="Existing operator / owner">
+            Existing operator / owner
+          </option>
+        </Select>
+      </Field>
+
+      <Field label="Business stage">
+        <Select
+          value={form.stage}
+          onChange={v => set('stage', v)}
+        >
+          <option value="Idea stage">Idea stage</option>
+          <option value="Startup from scratch">Startup from scratch</option>
+          <option value="Planning / feasibility stage">
+            Planning / feasibility stage
+          </option>
+          <option value="Existing business">Existing business</option>
+          <option value="Expansion of existing business">
+            Expansion of existing business
+          </option>
+        </Select>
+      </Field>
+
+      <Field
+        label="Target customer"
+        help="Optional, but useful for more accurate guidance."
+      >
+        <Text
+          value={form.target_customer}
+          onChange={v => set('target_customer', v)}
+          placeholder="e.g. families, corporate clients, women, tourists"
+        />
+      </Field>
+
+      <Field label={config.extraLabel}>
+        <Select
+          value={form.extra_status}
+          onChange={v => set('extra_status', v)}
+        >
+          <option value="">Select an option</option>
+
+          {config.extraOptions.map(option => (
+            <option key={option} value={option}>
+              {option}
+            </option>
+          ))}
+        </Select>
+      </Field>
+
+      <Field label="Additional notes">
+        <Textarea
+          rows={3}
+          value={form.notes}
+          onChange={v => set('notes', v)}
+        />
+      </Field>
+
+      <div className="actions">
+        <button type="submit" disabled={loading}>
+          {loading ? 'Analyzing...' : 'Get Business Guidance'}
+        </button>
+      </div>
+    </form>
+  );
+}
+
 function ClientDashboard() {
   const [client, setClient] = useState(null);
   const [authChecked, setAuthChecked] = useState(false);
@@ -1212,6 +1597,7 @@ function ClientDashboard() {
   const [activeSessionId, setActiveSessionId] = useState(null);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [showBusinessAssessment, setShowBusinessAssessment] = useState(false);
   const visitorId = useVisitorId();
 
   function getClientKey(clientData) {
@@ -1445,23 +1831,22 @@ function ClientDashboard() {
   function newChat() {
     setMessages([]);
     setActiveSessionId(null);
+    setShowBusinessAssessment(false);
     setTimeout(() => document.querySelector('.widgetComposer input')?.focus(), 10);
   }
 
-  async function submit(e) {
-    e.preventDefault();
+  async function sendClientMessage(text, displayText = null) {
+    const cleanText = String(text || '').trim();
 
-    const text = input.trim();
+    if (!cleanText || loading) return;
 
-    if (!text || loading) return;
+    const shownText = displayText || cleanText;
 
     const userMessage = {
       role: 'user',
-      text,
+      text: shownText,
       created_at: new Date().toISOString()
     };
-
-    setInput('');
 
     setMessages(current => {
       const next = [...current, userMessage];
@@ -1473,7 +1858,7 @@ function ClientDashboard() {
 
     try {
       const res = await sendChat({
-        message: text,
+        message: cleanText,
         visitor_id: `client:${client?.id || visitorId}`,
         lang: navigator.language || 'en'
       });
@@ -1507,6 +1892,60 @@ function ClientDashboard() {
       setLoading(false);
     }
   }
+
+
+  async function submit(e) {
+    e.preventDefault();
+
+    const text = input.trim();
+
+    if (!text || loading) return;
+
+    setInput('');
+    await sendClientMessage(text);
+  }
+
+
+  async function submitBusinessAssessment(assessment) {
+    const structuredMessage = [
+      '[BUSINESS_ASSESSMENT]',
+      `Industry: ${assessment.industry}`,
+      `Industry label: ${assessment.industry_label}`,
+      `Business type: ${assessment.business_type}`,
+      `Budget: ${assessment.budget} ${assessment.currency}`,
+      `Country: ${assessment.country}`,
+      `City / area: ${assessment.city || 'Not specified'}`,
+      `Previous experience: ${assessment.experience}`,
+      `Business stage: ${assessment.stage}`,
+      `Target customer: ${assessment.target_customer || 'Not specified'}`,
+      `${assessment.extra_label}: ${assessment.extra_status || 'Not specified'}`,
+      `Additional notes: ${assessment.notes || 'None'}`,
+      '',
+      'Please analyze this business assessment using only knowledge relevant to this industry and business type. Use anonymized insights from similar projects where available. Summarize the client profile, assess the stated budget and setup position, identify relevant licensing, staffing, operational and financial considerations, highlight risks, and provide practical next steps. Do not disclose business names, client identities, source file names, or individual confidential records.'
+    ].join('\n');
+
+    const displayText = [
+      `Business Assessment - ${assessment.industry_label}`,
+      '',
+      `Business type: ${assessment.business_type}`,
+      `Budget: ${assessment.budget} ${assessment.currency}`,
+      `Location: ${assessment.city ? `${assessment.city}, ` : ''}${assessment.country}`,
+      `Experience: ${assessment.experience}`,
+      `Stage: ${assessment.stage}`,
+      assessment.target_customer
+        ? `Target customer: ${assessment.target_customer}`
+        : null,
+      assessment.extra_status
+        ? `${assessment.extra_label}: ${assessment.extra_status}`
+        : null
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    setShowBusinessAssessment(false);
+    await sendClientMessage(structuredMessage, displayText);
+  }
+
 
   if (!authChecked) {
     return (
@@ -1608,9 +2047,32 @@ function ClientDashboard() {
 
           <div className="clientInfoCard">
             <h3>Quick Actions</h3>
-            <p>Ask the assistant about products, booking, service details, or document support.</p>
+            <p>
+              Ask the assistant about products, booking, service details,
+              document support, or start a structured business assessment.
+            </p>
+
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => setShowBusinessAssessment(value => !value)}
+              disabled={loading}
+            >
+              {showBusinessAssessment
+                ? 'Close Business Assessment'
+                : 'Start Business Assessment'}
+            </button>
           </div>
         </section>
+
+        {showBusinessAssessment && (
+          <section className="clientCards">
+            <BusinessAssessmentForm
+              onSubmit={submitBusinessAssessment}
+              loading={loading}
+            />
+          </section>
+        )}
 
         <section className="clientChatWidget">
           <div className="widgetHeader">
