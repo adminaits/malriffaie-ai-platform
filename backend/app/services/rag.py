@@ -1643,27 +1643,34 @@ async def answer_chat(
             date=date.today().isoformat(),
         )
 
-        prompt += "\n\nProducts:\n" + "\n".join(
-            [
-                f"- {p.get('name')} | "
-                f"{_format_price(p.get('price'), p.get('currency'))} | "
-                f"{p.get('description', '')}"
-                for p in ctx["products"]
-            ]
-        )
+        if assessment:
+            assessment_knowledge = ctx["knowledge"][:5]
 
-        prompt += "\n\nServices:\n" + "\n".join(
-            [
-                f"- {s.get('name')} | "
-                f"{_format_price(s.get('price'), s.get('currency'))} | "
-                f"{s.get('description', '')}"
-                for s in ctx["services"]
-            ]
-        )
+            prompt += "\n\nKnowledge context:\n" + "\n---\n".join(
+                [k.get("content", "")[:900] for k in assessment_knowledge]
+            )
+        else:
+            prompt += "\n\nProducts:\n" + "\n".join(
+                [
+                    f"- {p.get('name')} | "
+                    f"{_format_price(p.get('price'), p.get('currency'))} | "
+                    f"{p.get('description', '')}"
+                    for p in ctx["products"]
+                ]
+            )
 
-        prompt += "\n\nKnowledge context:\n" + "\n---\n".join(
-            [k.get("content", "")[:1200] for k in ctx["knowledge"]]
-        )
+            prompt += "\n\nServices:\n" + "\n".join(
+                [
+                    f"- {s.get('name')} | "
+                    f"{_format_price(s.get('price'), s.get('currency'))} | "
+                    f"{s.get('description', '')}"
+                    for s in ctx["services"]
+                ]
+            )
+
+            prompt += "\n\nKnowledge context:\n" + "\n---\n".join(
+                [k.get("content", "")[:1200] for k in ctx["knowledge"]]
+            )
 
         if assessment:
             prompt += "\n\nStructured client business assessment:\n"
@@ -1678,7 +1685,9 @@ async def answer_chat(
                 "4. Summarize relevant setup, licensing, staffing, operational, market, and financial considerations found in the approved context.\n"
                 "5. Use anonymized aggregate or generalized insights only. Never reveal business names, client identities, source file names, source IDs, or individual confidential figures.\n"
                 "6. If there is not enough relevant knowledge for a conclusion, say that clearly.\n"
-                "7. Finish with practical next steps and any important follow-up information still needed."
+                "7. Finish with practical next steps and any important follow-up information still needed.\n"
+                "8. Do not ask the client to repeat information already supplied in the assessment.\n"
+                "9. Summarize the relevant knowledge into a clear advisory answer; never reproduce raw document text."
             )
 
         recent_prompt = _conversation_to_prompt(recent_conversation)
@@ -1704,14 +1713,35 @@ async def answer_chat(
         hf = _build_huggingface_client(cfg)
 
         try:
+            configured_timeout = _safe_int(cfg.get("timeout"), 30)
+            generation_timeout = (
+                max(configured_timeout, 60)
+                if assessment
+                else configured_timeout
+            )
+
             answer = await hf.generate(
                 prompt,
                 temperature=cfg.get("temperature", 0.3),
                 top_p=cfg.get("top_p", 0.9),
                 max_tokens=cfg.get("max_tokens", 512),
-                timeout=cfg.get("timeout", 30),
+                timeout=generation_timeout,
             )
-        except Exception:
+
+            print(
+                "HF_GENERATION_RESULT:",
+                repr(answer)[:3000],
+                flush=True,
+            )
+
+        except Exception as exc:
+            print(
+                "HF_GENERATION_EXCEPTION:",
+                type(exc).__name__,
+                str(exc),
+                flush=True,
+            )
+
             answer = (
                 cfg.get("fallback_message")
                 or "I could not connect to the AI service right now. Please try again or contact support."
@@ -1721,6 +1751,11 @@ async def answer_chat(
             not answer
             or "AI is not configured" in answer
             or "AI connection exception" in answer
+            or "AI connection error" in answer
+            or "Request timed out" in answer
+            or "Connection failed" in answer
+            or "HTTP client error" in answer
+            or "no generated chat content" in answer.lower()
             or "No address associated with hostname" in answer
             or "Name or service not known" in answer
             or "Temporary failure in name resolution" in answer
@@ -1745,7 +1780,7 @@ async def answer_chat(
                         f"I found {relevant_cases} relevant anonymized knowledge source"
                         f"{'s' if relevant_cases != 1 else ''} for this business profile.",
                         "",
-                        "The AI summarization service is temporarily unavailable, so I will not display raw or potentially unrelated source text. Please try the assessment again shortly or contact Malriffaie Support for a detailed review.",
+                        "I found relevant knowledge for your assessment, but the AI generation step did not complete successfully. I will not display raw or potentially unrelated source text. Please try again shortly. If the issue continues, check the Render log entry beginning with HF_GENERATION_RESULT or HF_GENERATION_EXCEPTION.",
                     ]
                 )
             else:
