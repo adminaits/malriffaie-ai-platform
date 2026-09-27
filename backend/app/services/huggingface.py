@@ -1,126 +1,96 @@
-                    )
+import re
+import httpx
+from typing import Any
+from app.config import get_settings
 
-                return (
-                    "AI connection exception: "
-                    "Hugging Face returned no customer-facing generated content."
-                )
-
-            payload = {
-                "inputs": customer_prompt,
-                "parameters": {
-                    "temperature": float(temperature),
-                    "top_p": float(top_p),
-                    "max_new_tokens": int(max_tokens),
-                    "return_full_text": False,
-                },
-                "options": {
-                    "wait_for_model": True,
-                },
-            }
-
-            res = await self._post(
-                payload=payload,
-                timeout=timeout,
-            )
-
-            if res.status_code >= 400:
-                error_text = self._clean_error_text(res)
-
-                return (
-                    f"AI connection exception: HTTP {res.status_code}"
-                    + (f" - {error_text}" if error_text else "")
-                )
-
-            try:
-                data = res.json()
-
-            except Exception as exc:
-                return (
-                    "AI connection exception: "
-                    f"Invalid JSON response from custom endpoint: {exc}"
-                )
-
-            output = self._extract_legacy_text(data)
-
-            if output:
-                return self._ensure_complete_customer_answer(
-                    output,
-                    finish_reason="",
-                )
-
-            return (
-                "AI connection exception: "
-                "The custom endpoint returned no generated text."
-            )
-
-        except httpx.TimeoutException as exc:
-            return (
-                "AI connection exception: "
-                f"Request timed out - {str(exc)}"
-            )
-
-        except httpx.ConnectError as exc:
-            return (
-                "AI connection exception: "
-                f"Connection failed - {str(exc)}"
-            )
-
-        except httpx.HTTPError as exc:
-            return (
-                "AI connection exception: "
-                f"HTTP client error - {str(exc)}"
-            )
-
-        except Exception as exc:
-            return (
-                "AI connection exception: "
-                f"{type(exc).__name__}: {str(exc)}"
-            )
+settings = get_settings()
 
 
-async def test_hf_connection(
-    token: str,
-    model: str,
-    endpoint_url: str | None = None,
-) -> dict[str, Any]:
-    client = HuggingFaceClient(
-        token=token,
-        model=model,
-        endpoint_url=endpoint_url,
-    )
+class HuggingFaceClient:
+    """
+    Hugging Face chat/text-generation client.
 
-    output = await client.generate(
-        "Reply with exactly these two words and nothing else: connection ok",
-        temperature=0.1,
-        top_p=0.9,
-        max_tokens=40,
-        timeout=60,
-    )
+    Default behavior uses Hugging Face Inference Providers through the
+    OpenAI-compatible chat-completions router:
+        https://router.huggingface.co/v1/chat/completions
 
-    normalized = (output or "").strip().lower()
+    If a custom endpoint is supplied:
+    - URLs ending in /v1 are treated as OpenAI-compatible and
+      /chat/completions is appended.
+    - URLs containing /chat/completions are used directly.
+    - Any other custom URL is treated as a legacy text-generation endpoint.
 
-    error_markers = (
-        "ai is not configured",
-        "ai connection exception",
-        "ai connection error",
-        "request timed out",
-        "connection failed",
-    )
+    Customer-facing safeguards:
+    - Qwen thinking/reasoning is disabled with /no_think.
+    - Internal reasoning fields are never returned to the customer.
+    - <think>...</think> blocks are stripped if a provider leaks them.
+    - If generation is cut off by the token limit, the response is trimmed
+      back to a complete sentence and given a safe closing sentence.
+    """
 
-    has_error = any(
-        marker in normalized
-        for marker in error_markers
-    )
+    DEFAULT_CHAT_ENDPOINT = "https://router.huggingface.co/v1/chat/completions"
 
-    ok = (
-        not has_error
-        and "connection ok" in normalized
-    )
+    def __init__(
+        self,
+        token: str | None,
+        model: str | None = None,
+        endpoint_url: str | None = None,
+    ):
+        self.token = (token or "").strip() or None
 
-    return {
-        "ok": ok,
-        "endpoint_url": client.endpoint_url,
-        "endpoint_mode": client.endpoint_mode,
-        "model": client.model,
-        "message": output,
-    }
+        self.model = (
+            model
+            or getattr(settings, "default_hf_model", None)
+            or "Qwen/Qwen3-8B"
+        ).strip()
+
+        clean_endpoint = (endpoint_url or "").strip().rstrip("/")
+
+        if not clean_endpoint:
+            self.endpoint_url = self.DEFAULT_CHAT_ENDPOINT
+            self.endpoint_mode = "chat"
+
+        elif clean_endpoint.endswith("/chat/completions"):
+            self.endpoint_url = clean_endpoint
+            self.endpoint_mode = "chat"
+
+        elif clean_endpoint.endswith("/v1"):
+            self.endpoint_url = f"{clean_endpoint}/chat/completions"
+            self.endpoint_mode = "chat"
+
+        else:
+            self.endpoint_url = clean_endpoint
+            self.endpoint_mode = "legacy"
+
+    @staticmethod
+    def _clean_error_text(response: httpx.Response) -> str:
+        try:
+            data = response.json()
+
+            if isinstance(data, dict):
+                for key in ("error", "message", "detail"):
+                    value = data.get(key)
+
+                    if value:
+                        return str(value)[:1000]
+
+            return str(data)[:1000]
+
+        except Exception:
+            return (response.text or "").strip()[:1000]
+
+    @staticmethod
+    def _strip_reasoning(text: str) -> str:
+        value = str(text or "")
+
+        value = re.sub(
+            r"<think>.*?</think>",
+            "",
+            value,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+
+        value = re.sub(
+            r"<think>.*$",
+            "",
+            value,
