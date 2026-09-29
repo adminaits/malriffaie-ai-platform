@@ -1,25 +1,26 @@
-                        f"AI connection exception: HTTP {response.status_code}"
-                        + (f" - {error_text}" if error_text else "")
-                    )
+                    "max_tokens": int(max_tokens),
+                    "stream": False,
+                }
+
+                response = await self._post(payload, timeout)
+
+                if response.status_code >= 400:
+                    error_text = self._clean_error_text(response)
+                    return f"AI connection exception: HTTP {response.status_code} - {error_text}"
 
                 try:
                     data = response.json()
                 except Exception as exc:
-                    return (
-                        "AI connection exception: "
-                        f"Invalid JSON response from Hugging Face: {exc}"
-                    )
+                    return f"AI connection exception: Invalid JSON response from Hugging Face: {exc}"
 
-                output = self._extract_chat_text(data)
-                output = self._clean_customer_output(output)
+                output = self._clean_customer_output(
+                    self._extract_chat_text(data)
+                )
 
                 if output:
                     return output
 
-                return (
-                    "AI connection exception: "
-                    "Hugging Face returned no customer-facing generated content."
-                )
+                return "AI connection exception: Hugging Face returned no customer-facing generated content."
 
             payload = {
                 "inputs": customer_prompt,
@@ -38,29 +39,21 @@
 
             if response.status_code >= 400:
                 error_text = self._clean_error_text(response)
-                return (
-                    f"AI connection exception: HTTP {response.status_code}"
-                    + (f" - {error_text}" if error_text else "")
-                )
+                return f"AI connection exception: HTTP {response.status_code} - {error_text}"
 
             try:
                 data = response.json()
             except Exception as exc:
-                return (
-                    "AI connection exception: "
-                    f"Invalid JSON response from custom endpoint: {exc}"
-                )
+                return f"AI connection exception: Invalid JSON response from custom endpoint: {exc}"
 
-            output = self._extract_legacy_text(data)
-            output = self._clean_customer_output(output)
+            output = self._clean_customer_output(
+                self._extract_legacy_text(data)
+            )
 
             if output:
                 return output
 
-            return (
-                "AI connection exception: "
-                "The custom endpoint returned no generated text."
-            )
+            return "AI connection exception: The custom endpoint returned no generated text."
 
         except httpx.TimeoutException as exc:
             return f"AI connection exception: Request timed out - {exc}"
@@ -72,10 +65,7 @@
             return f"AI connection exception: HTTP client error - {exc}"
 
         except Exception as exc:
-            return (
-                "AI connection exception: "
-                f"{type(exc).__name__}: {exc}"
-            )
+            return f"AI connection exception: {type(exc).__name__}: {exc}"
 
 
 async def test_hf_connection(
@@ -107,8 +97,15 @@ async def test_hf_connection(
         "connection failed",
     )
 
-    has_error = any(marker in normalized for marker in error_markers)
-    ok = (not has_error) and ("connection ok" in normalized)
+    has_error = any(
+        marker in normalized
+        for marker in error_markers
+    )
+
+    ok = (
+        not has_error
+        and "connection ok" in normalized
+    )
 
     return {
         "ok": ok,
