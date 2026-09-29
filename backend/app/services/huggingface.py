@@ -1,10 +1,43 @@
-                payload=payload,
-                timeout=timeout,
-            )
+                        f"AI connection exception: HTTP {response.status_code}"
+                        + (f" - {error_text}" if error_text else "")
+                    )
+
+                try:
+                    data = response.json()
+                except Exception as exc:
+                    return (
+                        "AI connection exception: "
+                        f"Invalid JSON response from Hugging Face: {exc}"
+                    )
+
+                output = self._extract_chat_text(data)
+                output = self._clean_customer_output(output)
+
+                if output:
+                    return output
+
+                return (
+                    "AI connection exception: "
+                    "Hugging Face returned no customer-facing generated content."
+                )
+
+            payload = {
+                "inputs": customer_prompt,
+                "parameters": {
+                    "temperature": float(temperature),
+                    "top_p": float(top_p),
+                    "max_new_tokens": int(max_tokens),
+                    "return_full_text": False,
+                },
+                "options": {
+                    "wait_for_model": True,
+                },
+            }
+
+            response = await self._post(payload, timeout)
 
             if response.status_code >= 400:
                 error_text = self._clean_error_text(response)
-
                 return (
                     f"AI connection exception: HTTP {response.status_code}"
                     + (f" - {error_text}" if error_text else "")
@@ -12,7 +45,6 @@
 
             try:
                 data = response.json()
-
             except Exception as exc:
                 return (
                     "AI connection exception: "
@@ -20,7 +52,7 @@
                 )
 
             output = self._extract_legacy_text(data)
-            output = self._strip_reasoning(output)
+            output = self._clean_customer_output(output)
 
             if output:
                 return output
@@ -31,22 +63,13 @@
             )
 
         except httpx.TimeoutException as exc:
-            return (
-                "AI connection exception: "
-                f"Request timed out - {exc}"
-            )
+            return f"AI connection exception: Request timed out - {exc}"
 
         except httpx.ConnectError as exc:
-            return (
-                "AI connection exception: "
-                f"Connection failed - {exc}"
-            )
+            return f"AI connection exception: Connection failed - {exc}"
 
         except httpx.HTTPError as exc:
-            return (
-                "AI connection exception: "
-                f"HTTP client error - {exc}"
-            )
+            return f"AI connection exception: HTTP client error - {exc}"
 
         except Exception as exc:
             return (
@@ -60,9 +83,6 @@ async def test_hf_connection(
     model: str,
     endpoint_url: str | None = None,
 ) -> dict[str, Any]:
-    """
-    Test the same generation path used by the real chat/RAG flow.
-    """
     client = HuggingFaceClient(
         token=token,
         model=model,
@@ -87,22 +107,13 @@ async def test_hf_connection(
         "connection failed",
     )
 
-    has_error = any(
-        marker in normalized
-        for marker in error_markers
-    )
+    has_error = any(marker in normalized for marker in error_markers)
+    ok = (not has_error) and ("connection ok" in normalized)
 
-    ok = (
-        not has_error
-        and "connection ok" in normalized
-    )
-
-    result = {
+    return {
         "ok": ok,
         "endpoint_url": client.endpoint_url,
         "endpoint_mode": client.endpoint_mode,
         "model": client.model,
         "message": output,
     }
-
-    return result
