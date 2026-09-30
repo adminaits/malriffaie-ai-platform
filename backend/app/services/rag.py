@@ -7,6 +7,11 @@ from statistics import mean, median
 
 settings = get_settings()
 
+# TEMPORARY TESTING ONLY:
+# Set this to False before going live so internal source names/IDs
+# are never shown to clients.
+SHOW_RAG_SOURCES_TO_CLIENT = True
+
 PRIVATE_KNOWLEDGE_MESSAGE = """
 ## Thank You for Your Interest
 
@@ -96,7 +101,7 @@ def _clean_optional_url(value):
     return value
 
 
-def _clean_model_name(value, fallback="HuggingFaceH4/zephyr-7b-beta"):
+def _clean_model_name(value, fallback="Qwen/Qwen3-8B"):
     if value is None:
         return fallback
 
@@ -140,15 +145,112 @@ def _query_words(query: str) -> list[str]:
     return [word for word in words if word and word not in stop_words]
 
 
+def _expand_knowledge_terms(query: str) -> list[str]:
+    """
+    Expand a user's topic into closely-related search terms so the RAG layer
+    can retrieve approved knowledge even when the documents use different
+    wording.
+
+    Example:
+    "farming" -> agriculture, agricultural, farm, seeds, nuts, crops, etc.
+    """
+    low = (query or "").lower()
+
+    topic_groups = {
+        "farming": [
+            "farming",
+            "farm",
+            "farms",
+            "agriculture",
+            "agricultural",
+            "agri",
+            "seed",
+            "seeds",
+            "nut",
+            "nuts",
+            "crop",
+            "crops",
+            "produce",
+            "horticulture",
+            "plantation",
+            "greenhouse",
+            "irrigation",
+        ],
+        "healthcare": [
+            "healthcare",
+            "health care",
+            "medical",
+            "clinic",
+            "medical center",
+            "medical centre",
+            "home care",
+            "homecare",
+            "wellness",
+            "pharmacy",
+            "dental",
+            "physiotherapy",
+            "laboratory",
+        ],
+        "salon": [
+            "salon",
+            "beauty",
+            "spa",
+            "hair",
+            "nail",
+            "barber",
+            "massage",
+        ],
+        "hotel": [
+            "hotel",
+            "hospitality",
+            "resort",
+            "guest house",
+            "guesthouse",
+            "serviced apartment",
+        ],
+        "cafe": [
+            "cafe",
+            "café",
+            "coffee",
+            "restaurant",
+            "food",
+            "bakery",
+            "cloud kitchen",
+            "takeaway",
+        ],
+        "construction": [
+            "construction",
+            "contracting",
+            "contractor",
+            "civil works",
+            "fit out",
+            "fit-out",
+        ],
+    }
+
+    expanded = []
+
+    for terms in topic_groups.values():
+        if any(term in low for term in terms):
+            expanded.extend(terms)
+
+    return list(dict.fromkeys(expanded))
+
+
 def _keyword_score(text: str, query: str) -> int:
     text = (text or "").lower()
     words = _query_words(query)
+    expanded_terms = _expand_knowledge_terms(query)
 
     score = 0
 
     for word in words:
         if word in text:
-            score += 1
+            score += 2
+
+    for term in expanded_terms:
+        if term in text:
+            score += 4
 
     return score
 
@@ -241,7 +343,7 @@ def _load_knowledge_rows() -> list[dict]:
             supabase
             .table("knowledge_base")
             .select("id,source_type,source_id,content,metadata,access_level,internal_company_wiki")
-            .limit(300)
+            .limit(1000)
             .execute()
             .data
             or []
@@ -285,6 +387,15 @@ def retrieve_context(
 
         query_words = _query_words(query_text)
         query_industry = _detect_industry(query_text)
+        expanded_terms = _expand_knowledge_terms(query_text)
+
+        scoring_query = query_text
+        if expanded_terms:
+            scoring_query = (
+                query_text
+                + " "
+                + " ".join(expanded_terms)
+            ).strip()
 
         # Multi-word questions need a stronger relevance match than a
         # single-keyword lookup. This prevents generic words such as
@@ -302,7 +413,7 @@ def retrieve_context(
             if query_industry and not _row_matches_industry(item, query_industry):
                 continue
 
-            score = _score_knowledge_row(item, query_text)
+            score = _score_knowledge_row(item, scoring_query)
 
             if score >= minimum_score:
                 scored_kb.append((score, item))
@@ -854,6 +965,11 @@ def _detect_industry(message: str) -> str | None:
         "retail": ["retail", "retail shop", "store", "shop", "boutique", "ecommerce", "e-commerce", "online store"],
         "education": ["education", "school", "nursery", "training center", "training centre", "academy", "institute", "learning center", "learning centre"],
         "gym": ["gym", "fitness", "fitness center", "fitness centre", "sports center", "sports centre", "health club"],
+        "farming": [
+            "farming", "farm", "farms", "agriculture", "agricultural", "agri",
+            "seed", "seeds", "nut", "nuts", "crop", "crops", "produce",
+            "horticulture", "plantation", "greenhouse", "irrigation"
+        ],
     }
 
     for industry, terms in aliases.items():
@@ -936,6 +1052,15 @@ BUSINESS_INTAKE_QUESTIONS = {
         "Do you have previous fitness-industry experience or an existing customer base?",
         "Will this be a new startup or an expansion of an existing business?",
     ],
+    "farming": [
+        "What is your approximate budget?",
+        "Which country, city, or area are you planning to operate in?",
+        "What type of farming or agricultural activity are you considering?",
+        "Are you planning production, processing, importing, distribution, or retail?",
+        "What crops, seeds, nuts, produce, or agricultural products are you focusing on?",
+        "Do you already have land, facilities, suppliers, or farming experience?",
+        "Will this be a startup from scratch or an expansion of an existing business?",
+    ],
 }
 
 BUSINESS_INDUSTRY_LABELS = {
@@ -947,6 +1072,7 @@ BUSINESS_INDUSTRY_LABELS = {
     "retail": "retail",
     "education": "education and training",
     "gym": "fitness",
+    "farming": "farming and agriculture",
 }
 
 
@@ -1207,6 +1333,11 @@ def _row_matches_industry(row: dict, industry: str) -> bool:
         "retail": ["retail", "store", "shop", "boutique", "ecommerce", "e-commerce"],
         "education": ["education", "school", "nursery", "training", "academy", "institute"],
         "gym": ["gym", "fitness", "sports center", "sports centre", "health club"],
+        "farming": [
+            "farming", "farm", "farms", "agriculture", "agricultural", "agri",
+            "seed", "seeds", "nut", "nuts", "crop", "crops", "produce",
+            "horticulture", "plantation", "greenhouse", "irrigation"
+        ],
     }
 
     return any(term in content or term in meta_text for term in terms_map.get(industry, [industry]))
@@ -1465,12 +1596,12 @@ def _build_huggingface_client(cfg: dict) -> HuggingFaceClient:
     default_model = (
         getattr(settings, "default_hf_model", None)
         or getattr(settings, "default_model", None)
-        or "HuggingFaceH4/zephyr-7b-beta"
+        or "Qwen/Qwen3-8B"
     )
 
     model_name = _clean_model_name(
         model_name or default_model,
-        fallback="HuggingFaceH4/zephyr-7b-beta",
+        fallback="Qwen/Qwen3-8B",
     )
 
     endpoint_url = _clean_optional_url(
@@ -1484,6 +1615,84 @@ def _build_huggingface_client(cfg: dict) -> HuggingFaceClient:
         token=token,
         model=model_name,
         endpoint_url=endpoint_url,
+    )
+
+
+def _knowledge_source_name(row: dict) -> str:
+    """
+    Best-effort readable source label for temporary RAG testing.
+    """
+    metadata = row.get("metadata") or {}
+
+    if isinstance(metadata, dict):
+        for key in (
+            "name",
+            "filename",
+            "file_name",
+            "title",
+            "source_name",
+            "document_name",
+            "original_name",
+        ):
+            value = metadata.get(key)
+            if value:
+                return str(value).strip()
+
+    return str(
+        row.get("source_id")
+        or row.get("id")
+        or "Unknown source"
+    ).strip()
+
+
+def _append_test_sources(answer: str, knowledge_rows: list[dict]) -> str:
+    """
+    TEMPORARY TESTING ONLY.
+
+    Append unique source names and source IDs to the customer-visible answer
+    so RAG retrieval can be verified during development.
+    """
+    if not SHOW_RAG_SOURCES_TO_CLIENT:
+        return answer
+
+    if not knowledge_rows:
+        return answer
+
+    lines = []
+    seen = set()
+
+    for row in knowledge_rows:
+        source_id = str(
+            row.get("source_id")
+            or row.get("id")
+            or ""
+        ).strip()
+
+        source_name = _knowledge_source_name(row)
+        unique_key = (source_id, source_name)
+
+        if unique_key in seen:
+            continue
+
+        seen.add(unique_key)
+
+        if source_id and source_name and source_name != source_id:
+            lines.append(
+                f"- {source_name} | Source ID: {source_id}"
+            )
+        elif source_id:
+            lines.append(f"- Source ID: {source_id}")
+        else:
+            lines.append(f"- {source_name}")
+
+    if not lines:
+        return answer
+
+    return (
+        str(answer or "").rstrip()
+        + "\\n\\n"
+        + "TEST RAG SOURCES:\\n"
+        + "\\n".join(lines)
     )
 
 
@@ -1514,6 +1723,25 @@ async def answer_chat(
     ctx = retrieve_context(
         retrieval_query,
         include_private=client_logged_in,
+    )
+
+    print(
+        "RAG_DEBUG:",
+        {
+            "query": retrieval_query,
+            "client_logged_in": client_logged_in,
+            "knowledge_count": len(ctx.get("knowledge") or []),
+            "sources": [
+                {
+                    "source_id": row.get("source_id"),
+                    "source_type": row.get("source_type"),
+                    "access_level": _row_access_level(row),
+                    "preview": str(row.get("content") or "")[:160],
+                }
+                for row in (ctx.get("knowledge") or [])[:8]
+            ],
+        },
+        flush=True,
     )
 
     recent_conversation = (
@@ -1672,6 +1900,18 @@ async def answer_chat(
                 [k.get("content", "")[:1200] for k in ctx["knowledge"]]
             )
 
+        knowledge_count = len(ctx.get("knowledge") or [])
+
+        if knowledge_count > 0:
+            prompt += (
+                f"\n\nIMPORTANT: {knowledge_count} relevant approved knowledge-base "
+                "chunk(s) were retrieved for this question. "
+                "Use that knowledge to answer the customer's actual topic. "
+                "Do not say that Malriffaie has no information on the topic when "
+                "relevant approved knowledge has been supplied in the Knowledge context. "
+                "Do not replace the requested topic with generic company products or services."
+            )
+
         if assessment:
             prompt += "\n\nStructured client business assessment:\n"
             prompt += _business_assessment_profile(assessment)
@@ -1788,6 +2028,15 @@ async def answer_chat(
                     cfg.get("fallback_message")
                     or "I could not process the relevant business information properly right now. Please try again shortly or contact Malriffaie Support."
                 )
+
+    # TEMPORARY TESTING ONLY:
+    # Show which knowledge sources contributed to the AI/RAG answer.
+    # Disable SHOW_RAG_SOURCES_TO_CLIENT before production.
+    if used_knowledge and ctx.get("knowledge"):
+        answer = _append_test_sources(
+            answer,
+            ctx.get("knowledge") or [],
+        )
 
     if visitor_id:
         try:
