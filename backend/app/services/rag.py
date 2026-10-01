@@ -15,7 +15,7 @@ SHOW_RAG_SOURCES_TO_CLIENT = True
 PRIVATE_KNOWLEDGE_MESSAGE = """
 ## Thank You for Your Interest
 
-We appreciate you taking the time to learn more about **Mal Riffaie**. The information you’ve reviewed is just the beginning of how we can support your goals.
+We appreciate you taking the time to learn more about **MalRiffaie**. The information you’ve reviewed is just the beginning of how we can support your goals.
 
 To explore tailored solutions for your business or project, we invite you to:
 
