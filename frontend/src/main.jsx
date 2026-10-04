@@ -1375,6 +1375,31 @@ const BUSINESS_ASSESSMENT_CONFIG = {
       'Large',
       'Not decided yet'
     ]
+  },
+
+  farming: {
+    label: 'Farming / Agriculture',
+    typeLabel: 'Agriculture business type',
+    typeOptions: [
+      'Crop Farming',
+      'Seeds / Nursery',
+      'Nuts / Produce',
+      'Greenhouse',
+      'Hydroponics',
+      'Agricultural Trading',
+      'Food Processing',
+      'Other'
+    ],
+    extraLabel: 'Operating model',
+    extraOptions: [
+      'Production / Farming',
+      'Processing',
+      'Import / Distribution',
+      'Wholesale',
+      'Retail',
+      'Mixed',
+      'Not decided yet'
+    ]
   }
 };
 
@@ -1586,12 +1611,54 @@ function BusinessAssessmentForm({ onSubmit, loading }) {
 }
 
 
+function isBusinessIdeaDiscoveryRequest(message) {
+  const low = String(message || '')
+    .toLowerCase()
+    .replace(/[?.,!]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const discoveryPhrases = [
+    'what business can i start',
+    'which business can i start',
+    'what business should i start',
+    'which business should i start',
+    'what profitable business',
+    'which profitable business',
+    'profitable business i can start',
+    'business can i start with',
+    'business should i start with',
+    'business ideas for',
+    'business idea for',
+    'suggest a business',
+    'suggest business',
+    'recommend a business',
+    'recommend business',
+    'best business to start',
+    'good business to start',
+    'business opportunity for my budget',
+    'business opportunities for my budget',
+    'i have a budget',
+    'my budget is',
+    'my approximate budget is'
+  ];
+
+  return discoveryPhrases.some(phrase => low.includes(phrase));
+}
+
+
 function shouldOpenBusinessAssessment(message) {
   const low = String(message || '')
     .toLowerCase()
     .replace(/[?.,!]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+
+  // A customer who has not chosen an industry yet should first receive
+  // idea discovery / comparison guidance from the AI.
+  if (isBusinessIdeaDiscoveryRequest(low)) {
+    return false;
+  }
 
   const industryTerms = [
     'healthcare',
@@ -1624,7 +1691,18 @@ function shouldOpenBusinessAssessment(message) {
     'training center',
     'academy',
     'gym',
-    'fitness'
+    'fitness',
+    'farming',
+    'farm',
+    'agriculture',
+    'agricultural',
+    'seeds',
+    'seed',
+    'nuts',
+    'crop',
+    'crops',
+    'horticulture',
+    'greenhouse'
   ];
 
   const businessTerms = [
@@ -1655,43 +1733,29 @@ function shouldOpenBusinessAssessment(message) {
     'how to',
     'want to start',
     'start a',
-    'start the'
+    'start the',
+    'open a',
+    'set up',
+    'setup'
   ];
 
   const hasIndustry = industryTerms.some(term => low.includes(term));
   const hasBusiness = businessTerms.some(term => low.includes(term));
   const hasIntent = intentTerms.some(term => low.includes(term));
 
-  const generalBusinessPhrases = [
-    'start a business',
-    'start business',
-    'starting a business',
-    'start the business',
-    'set up a business',
-    'setup a business',
-    'business setup',
-    'open a business',
-    'new business',
-    'business idea',
-    'business opportunity',
-    'know about business',
-    'know more about business',
-    'tell me about business',
-    'learn about business',
-    'how to start a business',
-    'want to start a business',
-    'planning to start a business'
-  ];
+  // Important: no known industry = no assessment popup.
+  // This lets questions such as:
+  // "I have 20,000 BHD. What profitable business can I start?"
+  // go directly to the AI for idea discovery first.
+  if (!hasIndustry) {
+    return false;
+  }
 
-  const hasGeneralBusinessIntent = generalBusinessPhrases.some(
-    phrase => low.includes(phrase)
-  );
-
-  return (
-    (hasIndustry && (hasBusiness || hasIntent)) ||
-    hasGeneralBusinessIntent
-  );
+  // Once the customer has selected/named an industry, opening the form
+  // is appropriate when they show setup/start/business guidance intent.
+  return hasBusiness || hasIntent;
 }
+
 
 function ClientDashboard() {
   const [client, setClient] = useState(null);
@@ -2011,8 +2075,9 @@ function ClientDashboard() {
 
     setInput('');
 
-    // Logged-in client business/startup questions should open the structured
-    // Business Assessment form instead of immediately calling the AI.
+    // Open the structured form only after the client has identified
+    // a specific industry. Generic budget/business-idea discovery questions
+    // should go to the AI first so it can suggest suitable options.
     if (shouldOpenBusinessAssessment(text)) {
       const userMessage = {
         role: 'user',
