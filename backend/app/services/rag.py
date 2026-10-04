@@ -1188,45 +1188,157 @@ def _business_assessment_profile(assessment: dict) -> str:
 
 
 
+def _wants_business_idea_discovery(message: str) -> bool:
+    """
+    Detect broad idea-discovery questions where the client has a budget
+    but has NOT selected a specific industry yet.
+
+    Examples:
+    - "I have 20,000 BHD. What business can I start?"
+    - "What profitable business can I start with this budget?"
+    - "Suggest a business idea for 15,000 BD."
+
+    These questions should NOT trigger the Business Assessment intake.
+    The assistant should first compare suitable business ideas.
+    """
+    low = (message or "").lower().strip()
+
+    # If the user has already named a supported industry, this is no longer
+    # general discovery; the normal industry-specific assessment flow can apply.
+    if _detect_industry(message):
+        return False
+
+    discovery_phrases = [
+        "what business can i start",
+        "which business can i start",
+        "what business should i start",
+        "which business should i start",
+        "what profitable business",
+        "which profitable business",
+        "profitable business i can start",
+        "business can i start with",
+        "business should i start with",
+        "business ideas for",
+        "business idea for",
+        "suggest a business",
+        "suggest business",
+        "recommend a business",
+        "recommend business",
+        "best business to start",
+        "good business to start",
+        "business opportunity for my budget",
+        "business opportunities for my budget",
+        "i have a budget",
+        "my budget is",
+        "my approximate budget is",
+        "budget to start a business",
+        "budget for a business",
+    ]
+
+    if any(phrase in low for phrase in discovery_phrases):
+        return True
+
+    # Flexible fallback: budget/capital + broad business/start intent,
+    # but still no named industry.
+    has_budget = bool(
+        re.search(
+            r"\b(?:bhd|bd|budget|capital|investment)\b",
+            low,
+            flags=re.IGNORECASE,
+        )
+    )
+
+    has_business_intent = any(
+        phrase in low
+        for phrase in [
+            "start a business",
+            "start business",
+            "business idea",
+            "business opportunity",
+            "profitable business",
+            "new business",
+        ]
+    )
+
+    return has_budget and has_business_intent
+
+
+def _business_idea_discovery_search_query(message: str) -> str:
+    """
+    Build a broad retrieval query for cross-industry opportunity discovery.
+
+    The original client message is kept, while adding terms that are useful
+    across feasibility studies and startup/project knowledge.
+    """
+    base = str(message or "").strip()
+
+    discovery_terms = [
+        "startup",
+        "setup budget",
+        "startup cost",
+        "initial investment",
+        "project cost",
+        "feasibility",
+        "business opportunity",
+        "profit",
+        "revenue",
+        "break even",
+        "operating cost",
+    ]
+
+    return (base + " " + " ".join(discovery_terms)).strip()
+
+
 def _wants_business_start_guidance(message: str) -> bool:
+    """
+    Trigger the structured/intake guidance only after the client has named
+    a specific supported industry.
+
+    Broad questions such as:
+    "I have 20,000 BHD. What business can I start?"
+    are handled by business-idea discovery first.
+    """
     low = (message or "").lower().strip()
     industry = _detect_industry(message)
 
-    industry_start_terms = [
-        "start a business", "start business", "starting a business", "start the business",
-        "starting the business", "set up a business", "setup a business", "set up the business",
-        "setup the business", "open a business", "open business", "open the business",
-        "business idea", "business opportunity", "want to start", "planning to start",
-        "plan to start", "thinking to start", "thinking about starting", "know about",
-        "know more about", "learn about", "interested in starting", "interested to start",
-        "how to start", "what do i need to start", "what is needed to start",
-        "new venture", "new business",
-    ]
+    if not industry:
+        return False
 
-    general_business_terms = [
+    industry_start_terms = [
         "start a business",
         "start business",
         "starting a business",
+        "start the business",
+        "starting the business",
         "set up a business",
         "setup a business",
-        "business setup",
+        "set up the business",
+        "setup the business",
         "open a business",
-        "new business",
+        "open business",
+        "open the business",
         "business idea",
         "business opportunity",
-        "know about business",
-        "know more about business",
-        "tell me about business",
-        "learn about business",
-        "how to start a business",
-        "want to start a business",
-        "planning to start a business",
+        "want to start",
+        "planning to start",
+        "plan to start",
+        "thinking to start",
+        "thinking about starting",
+        "know about",
+        "know more about",
+        "learn about",
+        "interested in starting",
+        "interested to start",
+        "how to start",
+        "what do i need to start",
+        "what is needed to start",
+        "new venture",
+        "new business",
+        "tell me about",
+        "can i know about",
     ]
 
-    if any(term in low for term in general_business_terms):
-        return True
-
-    return bool(industry) and any(term in low for term in industry_start_terms)
+    return any(term in low for term in industry_start_terms)
 
 
 def _business_start_intake_answer(message: str) -> str:
@@ -1712,16 +1824,26 @@ async def answer_chat(
         else None
     )
 
-    retrieval_query = (
-        _business_assessment_search_query(assessment)
-        if assessment
-        else message
+    business_idea_discovery = (
+        client_logged_in
+        and not assessment
+        and _wants_business_idea_discovery(message)
     )
+
+    if assessment:
+        retrieval_query = _business_assessment_search_query(assessment)
+    elif business_idea_discovery:
+        retrieval_query = _business_idea_discovery_search_query(message)
+    else:
+        retrieval_query = message
 
     # Public users get public knowledge only.
     # Logged-in clients/admins get public + private/internal wiki knowledge.
+    # Idea discovery is intentionally broader because it compares options
+    # across different industries before the client chooses one.
     ctx = retrieve_context(
         retrieval_query,
+        limit=12 if business_idea_discovery else 8,
         include_private=client_logged_in,
     )
 
@@ -1730,6 +1852,7 @@ async def answer_chat(
         {
             "query": retrieval_query,
             "client_logged_in": client_logged_in,
+            "business_idea_discovery": business_idea_discovery,
             "knowledge_count": len(ctx.get("knowledge") or []),
             "sources": [
                 {
@@ -1777,6 +1900,7 @@ async def answer_chat(
     elif (
         client_logged_in
         and not assessment
+        and not business_idea_discovery
         and _wants_business_start_guidance(message)
     ):
         answer = _business_start_intake_answer(message)
@@ -1834,7 +1958,10 @@ async def answer_chat(
             recommended = [product]
 
         # 6. Only genuine recommendation requests use product recommendations.
-        elif _wants_recommendation(message):
+        elif (
+            not business_idea_discovery
+            and _wants_recommendation(message)
+        ):
             answer, recommended = _recommendation_answer(
                 message,
                 ctx["products"],
@@ -1910,6 +2037,36 @@ async def answer_chat(
                 "Do not say that Malriffaie has no information on the topic when "
                 "relevant approved knowledge has been supplied in the Knowledge context. "
                 "Do not replace the requested topic with generic company products or services."
+            )
+
+            if business_idea_discovery:
+                prompt += (
+                    "\nFor this discovery request, the retrieved context may intentionally "
+                    "contain multiple industries. Compare only the business ideas actually "
+                    "supported by that context and the client's budget."
+                )
+
+        if business_idea_discovery:
+            prompt += (
+                "\n\nBusiness idea discovery instructions:\n"
+                "1. The client has NOT chosen an industry yet. Do not ask them to complete "
+                "the Business Assessment form at this stage.\n"
+                "2. Use the client's stated budget and the approved retrieved knowledge to "
+                "suggest 3 to 5 realistic business ideas that appear compatible with that budget.\n"
+                "3. Compare the ideas briefly by likely setup intensity, operating complexity, "
+                "staffing needs, and key risks where the approved context supports those points.\n"
+                "4. Do not claim any option is guaranteed to be profitable. Use language such as "
+                "'may be suitable', 'appears more achievable', or 'worth exploring'.\n"
+                "5. Do not invent exact setup costs, profit margins, revenue, ROI, or break-even "
+                "figures that are not supported by the approved context.\n"
+                "6. Prefer ideas for which the approved knowledge contains useful setup, cost, "
+                "operational, or feasibility information.\n"
+                "7. If the available knowledge is insufficient to rank an option confidently, "
+                "say so clearly instead of guessing.\n"
+                "8. Finish by asking the client which suggested business they want to explore. "
+                "Once they choose a specific industry/business, the structured assessment can be used.\n"
+                "9. Do not redirect immediately to Malriffaie products or consultation unless "
+                "the client asks for those services."
             )
 
         if assessment:
