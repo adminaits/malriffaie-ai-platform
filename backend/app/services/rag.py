@@ -1289,6 +1289,211 @@ def _business_idea_discovery_search_query(message: str) -> str:
     return (base + " " + " ".join(discovery_terms)).strip()
 
 
+DISCOVERY_INDUSTRIES = [
+    "healthcare",
+    "salon",
+    "hotel",
+    "cafe",
+    "construction",
+    "retail",
+    "education",
+    "gym",
+    "farming",
+]
+
+
+def _extract_budget_from_message(message: str) -> float | None:
+    """
+    Best-effort extraction of a BHD budget from the client's message.
+
+    Examples:
+    - "20,000 BHD"
+    - "20000 bd"
+    - "budget is 15k"
+    """
+    low = str(message or "").lower().replace(",", "")
+
+    patterns = [
+        r"\b([0-9]+(?:\.[0-9]+)?)\s*(?:bhd|bd)\b",
+        r"\b(?:budget|capital|investment)\s*(?:is|of|around|about|approximately|approx)?\s*([0-9]+(?:\.[0-9]+)?)\s*k\b",
+        r"\b([0-9]+(?:\.[0-9]+)?)\s*k\s*(?:bhd|bd)?\b",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, low)
+        if not match:
+            continue
+
+        try:
+            value = float(match.group(1))
+        except Exception:
+            continue
+
+        if "k" in match.group(0):
+            value *= 1000
+
+        if value > 0:
+            return value
+
+    return None
+
+
+def _discovery_row_score(row: dict, industry: str, client_budget: float | None) -> int:
+    """
+    Score a knowledge row for cross-industry business discovery.
+
+    The score rewards:
+    - a clear industry match
+    - feasibility / setup / investment / financial content
+    - rows containing an extractable setup/startup/project amount
+    - budget amounts reasonably close to the client's stated budget
+    """
+    content = str(row.get("content") or "")
+    metadata = row.get("metadata") or {}
+    combined = f"{content} {metadata}".lower()
+
+    score = 0
+
+    if _row_matches_industry(row, industry):
+        score += 20
+
+    useful_terms = [
+        "feasibility",
+        "startup",
+        "setup",
+        "investment",
+        "project cost",
+        "capital",
+        "revenue",
+        "profit",
+        "break even",
+        "break-even",
+        "operating cost",
+        "operational cost",
+        "rent",
+        "staff",
+        "salary",
+        "equipment",
+        "fit out",
+        "fit-out",
+        "license",
+        "licensing",
+    ]
+
+    for term in useful_terms:
+        if term in combined:
+            score += 2
+
+    amount = _extract_benchmark_amount(row)
+    if amount is not None:
+        score += 8
+
+        if client_budget and client_budget > 0:
+            ratio = amount / client_budget
+
+            # Strongest preference is around the user's budget.
+            if 0.60 <= ratio <= 1.25:
+                score += 12
+            elif 0.35 <= ratio <= 1.75:
+                score += 7
+            elif ratio <= 2.50:
+                score += 3
+
+    return score
+
+
+def _retrieve_balanced_business_discovery_context(
+    message: str,
+    include_private: bool,
+    per_industry_limit: int = 2,
+    max_total: int = 16,
+) -> dict:
+    """
+    Scan approved knowledge across supported industries and return a balanced
+    set of business-opportunity evidence.
+
+    Important:
+    - no product/service rows are used for this discovery context
+    - one source cannot dominate simply because it has many chunks
+    - up to `per_industry_limit` distinct sources are selected per industry
+    """
+    all_rows = _load_knowledge_rows()
+    client_budget = _extract_budget_from_message(message)
+
+    selected = []
+    industry_summary = {}
+    seen_global_sources = set()
+
+    for industry in DISCOVERY_INDUSTRIES:
+        candidates = []
+
+        for row in all_rows:
+            if _is_private_row(row) and not include_private:
+                continue
+
+            if not _row_matches_industry(row, industry):
+                continue
+
+            score = _discovery_row_score(
+                row,
+                industry,
+                client_budget,
+            )
+
+            if score <= 0:
+                continue
+
+            candidates.append((score, row))
+
+        candidates.sort(key=lambda pair: pair[0], reverse=True)
+
+        chosen = []
+        seen_industry_sources = set()
+
+        for score, row in candidates:
+            source_id = str(
+                row.get("source_id")
+                or row.get("id")
+                or ""
+            ).strip()
+
+            dedupe_key = source_id or f"row:{row.get('id')}"
+
+            if dedupe_key in seen_industry_sources:
+                continue
+
+            if dedupe_key in seen_global_sources:
+                continue
+
+            chosen.append(row)
+            seen_industry_sources.add(dedupe_key)
+            seen_global_sources.add(dedupe_key)
+
+            if len(chosen) >= per_industry_limit:
+                break
+
+        if chosen:
+            industry_summary[industry] = len(chosen)
+            selected.extend(chosen)
+
+        if len(selected) >= max_total:
+            break
+
+    selected = selected[:max_total]
+
+    return {
+        "knowledge": selected,
+        "products": [],
+        "services": [],
+        "discovery_meta": {
+            "client_budget": client_budget,
+            "scanned_rows": len(all_rows),
+            "industry_summary": industry_summary,
+            "selected_sources": len(selected),
+        },
+    }
+
+
 def _wants_business_start_guidance(message: str) -> bool:
     """
     Trigger the structured/intake guidance only after the client has named
@@ -1839,13 +2044,24 @@ async def answer_chat(
 
     # Public users get public knowledge only.
     # Logged-in clients/admins get public + private/internal wiki knowledge.
-    # Idea discovery is intentionally broader because it compares options
-    # across different industries before the client chooses one.
-    ctx = retrieve_context(
-        retrieval_query,
-        limit=12 if business_idea_discovery else 8,
-        include_private=client_logged_in,
-    )
+    #
+    # Business idea discovery uses a dedicated balanced cross-industry
+    # retriever. It deliberately excludes Malriffaie products/services so
+    # the model recommends actual business categories rather than consultancy
+    # products such as Marketing Strategy or Retainer Membership.
+    if business_idea_discovery:
+        ctx = _retrieve_balanced_business_discovery_context(
+            message=message,
+            include_private=client_logged_in,
+            per_industry_limit=2,
+            max_total=16,
+        )
+    else:
+        ctx = retrieve_context(
+            retrieval_query,
+            limit=8,
+            include_private=client_logged_in,
+        )
 
     print(
         "RAG_DEBUG:",
@@ -1854,6 +2070,7 @@ async def answer_chat(
             "client_logged_in": client_logged_in,
             "business_idea_discovery": business_idea_discovery,
             "knowledge_count": len(ctx.get("knowledge") or []),
+            "discovery_meta": ctx.get("discovery_meta") if business_idea_discovery else None,
             "sources": [
                 {
                     "source_id": row.get("source_id"),
@@ -1914,24 +2131,44 @@ async def answer_chat(
 
     # 1. Service-list/service-description questions.
     # This must be checked before product recommendation logic.
-    elif answer is None and _wants_service_list(message):
+    elif (
+        answer is None
+        and not business_idea_discovery
+        and _wants_service_list(message)
+    ):
         answer = _service_list_answer(ctx["services"])
         recommended = []
 
     # 2. Product-list questions.
-    elif answer is None and _wants_product_list(message):
+    elif (
+        answer is None
+        and not business_idea_discovery
+        and _wants_product_list(message)
+    ):
         answer = _product_list_answer(ctx["products"])
         # Return every available product so the frontend can render the full list.
         recommended = ctx["products"]
 
     # 3. Booking/consultation questions.
-    elif answer is None and _wants_booking(message):
+    elif (
+        answer is None
+        and not business_idea_discovery
+        and _wants_booking(message)
+    ):
         answer = _booking_answer(ctx["services"])
         recommended = []
 
     elif answer is None:
-        service = _matched_service(message, ctx["services"])
-        product = _matched_product(message, ctx["products"])
+        service = (
+            None
+            if business_idea_discovery
+            else _matched_service(message, ctx["services"])
+        )
+        product = (
+            None
+            if business_idea_discovery
+            else _matched_product(message, ctx["products"])
+        )
 
         detail_words = [
             "tell",
@@ -2004,6 +2241,37 @@ async def answer_chat(
             prompt += "\n\nKnowledge context:\n" + "\n---\n".join(
                 [k.get("content", "")[:900] for k in assessment_knowledge]
             )
+
+        elif business_idea_discovery:
+            # IMPORTANT: Do not include Malriffaie product/service catalog here.
+            # The user is asking which BUSINESS they could start, not which
+            # Malriffaie service/product to buy.
+            discovery_rows = ctx.get("knowledge") or []
+
+            prompt += (
+                "\n\nBUSINESS OPPORTUNITY KNOWLEDGE CONTEXT:\n"
+                + "\n---\n".join(
+                    [k.get("content", "")[:1200] for k in discovery_rows]
+                )
+            )
+
+            discovery_meta = ctx.get("discovery_meta") or {}
+            client_budget = discovery_meta.get("client_budget")
+
+            if client_budget:
+                prompt += (
+                    "\n\nClient stated budget: "
+                    f"{_format_price(client_budget, 'BHD')}"
+                )
+
+            prompt += (
+                "\n\nThe context above contains anonymized knowledge from "
+                "multiple business categories. Treat each category as a possible "
+                "business opportunity only when the context provides relevant "
+                "support. Do not treat Malriffaie consulting products or services "
+                "as businesses the client can start."
+            )
+
         else:
             prompt += "\n\nProducts:\n" + "\n".join(
                 [
@@ -2051,22 +2319,27 @@ async def answer_chat(
                 "\n\nBusiness idea discovery instructions:\n"
                 "1. The client has NOT chosen an industry yet. Do not ask them to complete "
                 "the Business Assessment form at this stage.\n"
-                "2. Use the client's stated budget and the approved retrieved knowledge to "
-                "suggest 3 to 5 realistic business ideas that appear compatible with that budget.\n"
-                "3. Compare the ideas briefly by likely setup intensity, operating complexity, "
-                "staffing needs, and key risks where the approved context supports those points.\n"
-                "4. Do not claim any option is guaranteed to be profitable. Use language such as "
-                "'may be suitable', 'appears more achievable', or 'worth exploring'.\n"
-                "5. Do not invent exact setup costs, profit margins, revenue, ROI, or break-even "
-                "figures that are not supported by the approved context.\n"
-                "6. Prefer ideas for which the approved knowledge contains useful setup, cost, "
-                "operational, or feasibility information.\n"
-                "7. If the available knowledge is insufficient to rank an option confidently, "
-                "say so clearly instead of guessing.\n"
-                "8. Finish by asking the client which suggested business they want to explore. "
-                "Once they choose a specific industry/business, the structured assessment can be used.\n"
-                "9. Do not redirect immediately to Malriffaie products or consultation unless "
-                "the client asks for those services."
+                "2. Suggest 3 to 5 ACTUAL BUSINESS CATEGORIES the client could consider "
+                "starting. Examples of categories are cafe, salon, retail, farming, gym, "
+                "education, healthcare, hospitality, or construction when supported by context.\n"
+                "3. NEVER present Malriffaie products/services such as Marketing Strategy, "
+                "HR Manual, Partnership Agreement, Feasibility Study, Retainer Membership, "
+                "or Consultation as businesses the client could start.\n"
+                "4. Use the client's stated budget and only the approved multi-industry "
+                "knowledge supplied above.\n"
+                "5. Briefly explain why each suggested business may fit, including setup "
+                "intensity, staffing, operating complexity, and main risks only where supported.\n"
+                "6. Do not claim any option is guaranteed to be profitable. Use wording such as "
+                "'may be suitable', 'appears achievable', or 'worth exploring'.\n"
+                "7. Do not invent exact setup costs, profit margins, revenue, ROI, or break-even "
+                "figures that are not supported by approved knowledge.\n"
+                "8. If one industry appears to exceed the budget based on available evidence, "
+                "say so and avoid ranking it as a strong fit.\n"
+                "9. Prefer diversity: do not return three variations of the same industry when "
+                "credible alternatives exist.\n"
+                "10. Finish by asking which suggested business the client wants to explore. "
+                "After the client chooses one, the structured Business Assessment can be used.\n"
+                "11. Do not redirect to consultation or products unless the client asks for them."
             )
 
         if assessment:
@@ -2211,6 +2484,6 @@ async def answer_chat(
 
     return {
         "answer": answer,
-        "products": [] if assessment else recommended,
+        "products": [] if (assessment or business_idea_discovery) else recommended,
         "sources": ctx["knowledge"] if used_knowledge else [],
     }
