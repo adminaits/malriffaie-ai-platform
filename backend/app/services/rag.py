@@ -1579,6 +1579,578 @@ def _business_start_intake_answer(message: str) -> str:
     return "\n".join(lines)
 
 
+SIMILAR_BUSINESS_FAMILIES = {
+    "food_service": {
+        "topic_terms": [
+            "restaurant", "restaurants", "cafe", "café", "coffee shop",
+            "bakery", "takeaway", "cloud kitchen", "kiosk", "food service",
+        ],
+        "close_terms": [
+            "restaurant", "restaurants", "cafe", "café", "coffee shop",
+            "bakery", "takeaway", "cloud kitchen", "kiosk", "food service",
+        ],
+        "proxy_terms": [
+            "hotel restaurant", "hotel f&b", "hotel f & b",
+            "food and beverage", "f&b department", "f & b department",
+        ],
+    },
+    "hospitality": {
+        "topic_terms": [
+            "hotel", "hotels", "resort", "hospitality", "guest house",
+            "guesthouse", "serviced apartment", "serviced apartments",
+        ],
+        "close_terms": [
+            "hotel", "hotels", "resort", "hospitality", "guest house",
+            "guesthouse", "serviced apartment", "serviced apartments",
+        ],
+        "proxy_terms": [],
+    },
+    "food_processing": {
+        "topic_terms": [
+            "food processing", "food manufacturing", "snack manufacturing",
+            "chocolate manufacturing", "food production", "food factory",
+        ],
+        "close_terms": [
+            "food processing", "food manufacturing", "snack manufacturing",
+            "chocolate manufacturing", "food production", "food factory",
+        ],
+        "proxy_terms": ["packaging", "production line"],
+    },
+    "light_manufacturing": {
+        "topic_terms": [
+            "cap manufacturing", "caps manufacturing", "cap business",
+            "caps business", "hat manufacturing", "hats manufacturing",
+            "headwear", "apparel", "garment", "garments", "textile",
+            "clothing", "light manufacturing", "embroidery",
+            "printing factory", "manufacturing", "factory", "production",
+        ],
+        "close_terms": [
+            "cap", "caps", "hat", "hats", "headwear", "apparel",
+            "garment", "garments", "textile", "clothing",
+            "light manufacturing", "embroidery", "printing",
+            "manufacturing", "factory", "production",
+        ],
+        "proxy_terms": ["packaging manufacturing", "small manufacturing"],
+    },
+    "beauty": {
+        "topic_terms": [
+            "salon", "beauty", "spa", "hair salon", "nail salon",
+            "barber", "barbershop", "massage center", "massage centre",
+        ],
+        "close_terms": [
+            "salon", "beauty", "spa", "hair", "nail", "barber", "massage",
+        ],
+        "proxy_terms": [],
+    },
+    "healthcare": {
+        "topic_terms": [
+            "healthcare", "health care", "medical", "clinic", "medical center",
+            "medical centre", "home care", "homecare", "nursing", "wellness",
+            "pharmacy", "dental", "physiotherapy", "laboratory",
+        ],
+        "close_terms": [
+            "healthcare", "health care", "medical", "clinic", "medical center",
+            "medical centre", "home care", "homecare", "nursing", "wellness",
+            "pharmacy", "dental", "physiotherapy", "laboratory",
+        ],
+        "proxy_terms": [],
+    },
+    "construction": {
+        "topic_terms": [
+            "construction", "contracting", "contractor", "fit out",
+            "fit-out", "civil works",
+        ],
+        "close_terms": [
+            "construction", "contracting", "contractor", "fit out",
+            "fit-out", "civil works",
+        ],
+        "proxy_terms": [],
+    },
+    "retail": {
+        "topic_terms": [
+            "retail", "shop", "store", "boutique", "ecommerce", "e-commerce",
+        ],
+        "close_terms": [
+            "retail", "shop", "store", "boutique", "ecommerce", "e-commerce",
+        ],
+        "proxy_terms": [],
+    },
+    "fitness": {
+        "topic_terms": [
+            "gym", "fitness", "health club", "sports center", "sports centre",
+        ],
+        "close_terms": [
+            "gym", "fitness", "health club", "sports center", "sports centre",
+        ],
+        "proxy_terms": [],
+    },
+    "agriculture": {
+        "topic_terms": [
+            "farming", "farm", "agriculture", "agricultural", "greenhouse",
+            "horticulture", "crop", "crops", "seeds", "nuts",
+        ],
+        "close_terms": [
+            "farming", "farm", "agriculture", "agricultural", "greenhouse",
+            "horticulture", "crop", "crops", "seeds", "nuts",
+        ],
+        "proxy_terms": [],
+    },
+}
+
+FOLLOWUP_METRIC_TERMS = {
+    "salary": [
+        "salary", "salaries", "wage", "wages", "payroll",
+        "compensation", "monthly pay",
+    ],
+    "staffing": [
+        "staff", "staffing", "employee", "employees", "worker", "workers",
+        "manpower", "headcount", "labor", "labour",
+    ],
+    "expenses": [
+        "expense", "expenses", "operating cost", "operational cost",
+        "overhead", "overheads", "utilities", "marketing cost",
+        "packaging cost", "maintenance cost",
+    ],
+    "equipment": [
+        "equipment", "machinery", "machine", "machines", "tools",
+        "production line",
+    ],
+    "rent": ["rent", "rental", "lease", "premises"],
+    "budget": [
+        "budget", "startup cost", "setup cost", "initial investment",
+        "investment", "project cost", "capital", "capex",
+    ],
+    "revenue": ["revenue", "sales", "turnover", "income"],
+    "profit": ["profit", "margin", "net income", "gross profit"],
+    "licensing": ["license", "licence", "licensing", "permit", "approval"],
+}
+
+
+def _normalize_search_text(value) -> str:
+    return " ".join(str(value or "").lower().replace("_", " ").split())
+
+
+def _contains_search_term(text_value: str, term: str) -> bool:
+    text_low = _normalize_search_text(text_value)
+    term_low = _normalize_search_text(term)
+
+    if not term_low:
+        return False
+
+    if " " in term_low or "-" in term_low or "&" in term_low:
+        return term_low in text_low
+
+    return bool(
+        re.search(
+            rf"(?<![a-z0-9]){re.escape(term_low)}(?![a-z0-9])",
+            text_low,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _detect_business_family(text_value: str) -> str | None:
+    low = _normalize_search_text(text_value)
+
+    # Specific food-processing must be checked before generic manufacturing.
+    family_order = [
+        "food_service",
+        "food_processing",
+        "hospitality",
+        "light_manufacturing",
+        "beauty",
+        "healthcare",
+        "construction",
+        "retail",
+        "fitness",
+        "agriculture",
+    ]
+
+    for family in family_order:
+        config = SIMILAR_BUSINESS_FAMILIES[family]
+        if any(_contains_search_term(low, term) for term in config["topic_terms"]):
+            return family
+
+    return None
+
+
+def _detect_followup_metric(message: str) -> str:
+    low = _normalize_search_text(message)
+
+    for metric, terms in FOLLOWUP_METRIC_TERMS.items():
+        if any(_contains_search_term(low, term) for term in terms):
+            return metric
+
+    return "general"
+
+
+def _resolve_followup_metric(message: str, recent_rows: list[dict]) -> str:
+    metric = _detect_followup_metric(message)
+
+    if metric != "general":
+        return metric
+
+    # "Can you share the average breakdown?" should inherit the last concrete
+    # metric, e.g. expenses, instead of becoming a random new search.
+    for row in reversed(recent_rows or []):
+        previous = str(row.get("message") or "").strip()
+        previous_metric = _detect_followup_metric(previous)
+        if previous_metric != "general":
+            return previous_metric
+
+    return "general"
+
+
+def _has_explicit_business_topic(message: str) -> bool:
+    low = _normalize_search_text(message)
+
+    if _detect_business_family(low):
+        return True
+
+    explicit_markers = [
+        "manufacturing", "factory", "production", "trading", "restaurant",
+        "cafe", "café", "hotel", "salon", "clinic", "construction",
+        "retail", "gym", "farming",
+    ]
+
+    return any(_contains_search_term(low, marker) for marker in explicit_markers)
+
+
+def _is_contextual_followup(message: str) -> bool:
+    low = _normalize_search_text(message)
+
+    if not low:
+        return False
+
+    # If the current message itself clearly names the business, treat it as a
+    # new/explicit topic message, not as an ambiguous follow-up.
+    if _has_explicit_business_topic(low):
+        return False
+
+    markers = [
+        "how many staff", "how many employees", "staff salary", "staff salaries",
+        "what will be the salary", "what is the salary", "is it for all",
+        "is that for all", "other expenses", "other expense", "other costs",
+        "other cost", "average breakdown", "cost breakdown", "breakdown for this",
+        "what about", "how much", "what will be", "what would be",
+        "can you share", "can you explain", "more details", "continue",
+        "yes please",
+    ]
+
+    if any(marker in low for marker in markers):
+        return True
+
+    words = _query_words(low)
+    generic = {
+        "staff", "employee", "employees", "salary", "salaries", "expense",
+        "expenses", "cost", "costs", "equipment", "rent", "revenue", "profit",
+        "breakdown", "average", "required", "need", "monthly", "yearly",
+    }
+
+    meaningful = [word for word in words if word not in generic]
+    return len(words) <= 8 and len(meaningful) <= 2
+
+
+def _topic_anchor_terms(text_value: str) -> list[str]:
+    words = _query_words(text_value)
+    noise = {
+        "prefer", "choose", "chosen", "choice", "want", "know", "about",
+        "more", "could", "should", "like", "idea", "option", "category",
+        "selected", "select", "explore", "further", "please", "explain",
+        "details", "detail", "start", "starting", "business", "company",
+        "okay", "ok",
+    }
+
+    anchors = []
+
+    for word in words:
+        if word in noise or word.isdigit() or len(word) < 3:
+            continue
+        if word not in anchors:
+            anchors.append(word)
+
+    return anchors[:5]
+
+
+def _find_recent_business_topic(
+    rows: list[dict],
+) -> tuple[str | None, list[str], str | None]:
+    """
+    Find the latest explicit business topic from CUSTOMER messages only.
+    Assistant responses are intentionally ignored so a bad AI answer cannot
+    silently change the active business topic.
+    """
+    for row in reversed(rows or []):
+        customer_message = str(row.get("message") or "").strip()
+
+        if not customer_message:
+            continue
+
+        if _is_contextual_followup(customer_message):
+            continue
+
+        if not _has_explicit_business_topic(customer_message):
+            continue
+
+        anchors = _topic_anchor_terms(customer_message)
+        family = _detect_business_family(customer_message)
+
+        if anchors:
+            return customer_message, anchors, family
+
+    return None, [], None
+
+
+def _row_text(row: dict) -> str:
+    metadata = row.get("metadata") or {}
+    return _normalize_search_text(
+        f"{row.get('content') or ''} {metadata}"
+    )
+
+
+def _row_contains_metric(row: dict, metric: str) -> bool:
+    if metric == "general":
+        return True
+
+    text_value = _row_text(row)
+    terms = FOLLOWUP_METRIC_TERMS.get(metric, [])
+    return any(_contains_search_term(text_value, term) for term in terms)
+
+
+def _row_exact_topic_score(row: dict, anchors: list[str]) -> int:
+    if not anchors:
+        return 0
+
+    text_value = _row_text(row)
+    matched = sum(
+        1 for anchor in anchors
+        if _contains_search_term(text_value, anchor)
+    )
+
+    if len(anchors) == 1:
+        return 100 if matched == 1 else 0
+
+    if matched >= 2:
+        return 100 + (matched * 5)
+
+    return 0
+
+
+def _row_similarity_level(
+    row: dict,
+    target_family: str | None,
+    metric: str,
+) -> tuple[int, str]:
+    """
+    Allow proxy borrowing only from operationally sensible similar businesses.
+    Numeric borrowing also requires evidence relevant to the requested metric.
+    """
+    if not target_family:
+        return 0, ""
+
+    text_value = _row_text(row)
+    row_family = _detect_business_family(text_value)
+    config = SIMILAR_BUSINESS_FAMILIES.get(target_family) or {}
+
+    if metric != "general" and not _row_contains_metric(row, metric):
+        return 0, ""
+
+    # Same family: strong proxy.
+    if row_family == target_family:
+        if any(
+            _contains_search_term(text_value, term)
+            for term in config.get("close_terms", [])
+        ):
+            return 80, "similar business"
+
+    # Explicit cross-family proxy terms only. This is how hotel F&B can help a
+    # restaurant/cafe question without using whole-hotel costs.
+    if any(
+        _contains_search_term(text_value, term)
+        for term in config.get("proxy_terms", [])
+    ):
+        return 60, "broader industry proxy"
+
+    return 0, ""
+
+
+def _load_products_and_services() -> tuple[list[dict], list[dict]]:
+    try:
+        products = (
+            supabase
+            .table("products")
+            .select("*")
+            .eq("available", True)
+            .order("created_at", desc=True)
+            .limit(30)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        products = []
+
+    try:
+        services = (
+            supabase
+            .table("services")
+            .select("*")
+            .eq("available", True)
+            .order("created_at", desc=True)
+            .limit(30)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        services = []
+
+    return products, services
+
+
+def _retrieve_followup_business_context(
+    message: str,
+    recent_rows: list[dict],
+    include_private: bool,
+    limit: int = 8,
+) -> tuple[dict, dict]:
+    """
+    Retrieve exact-topic evidence first. If the exact topic does not contain
+    enough evidence for the requested metric, add carefully-labelled proxy
+    evidence from similar businesses.
+    """
+    topic_message, anchors, family = _find_recent_business_topic(recent_rows)
+    metric = _resolve_followup_metric(message, recent_rows)
+
+    meta = {
+        "active_topic": topic_message,
+        "anchors": anchors,
+        "family": family,
+        "metric": metric,
+        "exact_sources": 0,
+        "proxy_sources": 0,
+    }
+
+    if not topic_message or not anchors:
+        fallback = retrieve_context(
+            message,
+            limit=limit,
+            include_private=include_private,
+        )
+        return fallback, meta
+
+    all_rows = _load_knowledge_rows()
+    exact_source_ids = set()
+
+    # Identify sources that clearly belong to the selected exact topic.
+    for row in all_rows:
+        if _is_private_row(row) and not include_private:
+            continue
+
+        if _row_exact_topic_score(row, anchors) > 0:
+            source_id = str(row.get("source_id") or row.get("id") or "").strip()
+            if source_id:
+                exact_source_ids.add(source_id)
+
+    exact_candidates = []
+    proxy_candidates = []
+
+    metric_terms = " ".join(FOLLOWUP_METRIC_TERMS.get(metric, []))
+    relevance_query = f"{topic_message} {message} {metric_terms}".strip()
+
+    for row in all_rows:
+        if _is_private_row(row) and not include_private:
+            continue
+
+        source_id = str(row.get("source_id") or row.get("id") or "").strip()
+        relevance = _score_knowledge_row(row, relevance_query)
+
+        # Exact business/source always gets priority. Rows containing the
+        # requested metric get an additional boost.
+        if source_id and source_id in exact_source_ids:
+            metric_bonus = 30 if _row_contains_metric(row, metric) else 0
+            exact_candidates.append((200 + metric_bonus + relevance, row))
+            continue
+
+        proxy_score, proxy_label = _row_similarity_level(row, family, metric)
+        if proxy_score > 0:
+            row_copy = dict(row)
+            row_copy["_rag_match_level"] = proxy_label
+            row_copy["_rag_family"] = family
+            proxy_candidates.append((proxy_score + relevance, row_copy))
+
+    exact_candidates.sort(key=lambda pair: pair[0], reverse=True)
+    proxy_candidates.sort(key=lambda pair: pair[0], reverse=True)
+
+    selected = []
+    seen_chunks = set()
+
+    # Prefer up to 5 exact-topic chunks.
+    for _, row in exact_candidates:
+        source_key = str(row.get("source_id") or row.get("id") or "")
+        content_key = (source_key, str(row.get("content") or "")[:160])
+
+        if content_key in seen_chunks:
+            continue
+
+        row_copy = dict(row)
+        row_copy["_rag_match_level"] = "exact topic"
+        row_copy["_rag_family"] = family
+        selected.append(row_copy)
+        seen_chunks.add(content_key)
+
+        if len(selected) >= min(5, limit):
+            break
+
+    # Fill remaining slots using sensible proxy evidence only.
+    for _, row in proxy_candidates:
+        if len(selected) >= limit:
+            break
+
+        source_key = str(row.get("source_id") or row.get("id") or "")
+        content_key = (source_key, str(row.get("content") or "")[:160])
+
+        if content_key in seen_chunks:
+            continue
+
+        selected.append(row)
+        seen_chunks.add(content_key)
+
+    meta["exact_sources"] = len({
+        row.get("source_id") or row.get("id")
+        for row in selected
+        if row.get("_rag_match_level") == "exact topic"
+    })
+    meta["proxy_sources"] = len({
+        row.get("source_id") or row.get("id")
+        for row in selected
+        if row.get("_rag_match_level") != "exact topic"
+    })
+
+    products, services = _load_products_and_services()
+
+    return {
+        "knowledge": selected,
+        "products": products,
+        "services": services,
+    }, meta
+
+
+def _format_followup_knowledge_context(rows: list[dict]) -> str:
+    blocks = []
+
+    for row in rows:
+        level = row.get("_rag_match_level") or "retrieved knowledge"
+        content = str(row.get("content") or "")[:1200].strip()
+
+        if not content:
+            continue
+
+        blocks.append(f"[Evidence level: {level}]\n{content}")
+
+    return "\n---\n".join(blocks)
+
+
 def _load_recent_conversation(visitor_id: str | None, limit: int = 6) -> list[dict]:
     if not visitor_id:
         return []
@@ -1615,11 +2187,12 @@ def _conversation_to_prompt(rows: list[dict]) -> str:
 
 
 def _recent_business_industry(rows: list[dict]) -> str | None:
+    # Use customer messages only. Assistant responses may contain an earlier
+    # retrieval mistake and must never redefine the user's active industry.
     for row in reversed(rows):
-        for value in [row.get("message"), row.get("response")]:
-            industry = _detect_industry(str(value or ""))
-            if industry:
-                return industry
+        industry = _detect_industry(str(row.get("message") or ""))
+        if industry:
+            return industry
     return None
 
 
@@ -1966,8 +2539,8 @@ def _append_test_sources(answer: str, knowledge_rows: list[dict]) -> str:
     """
     TEMPORARY TESTING ONLY.
 
-    Append unique source names and source IDs to the customer-visible answer
-    so RAG retrieval can be verified during development.
+    Append unique source names, source IDs, and retrieval evidence levels to
+    the customer-visible answer so RAG behavior can be verified.
     """
     if not SHOW_RAG_SOURCES_TO_CLIENT:
         return answer
@@ -1986,30 +2559,33 @@ def _append_test_sources(answer: str, knowledge_rows: list[dict]) -> str:
         ).strip()
 
         source_name = _knowledge_source_name(row)
-        unique_key = (source_id, source_name)
+        match_level = str(row.get("_rag_match_level") or "retrieved").strip()
+        unique_key = (source_id, source_name, match_level)
 
         if unique_key in seen:
             continue
 
         seen.add(unique_key)
 
+        suffix = f" | Match: {match_level}"
+
         if source_id and source_name and source_name != source_id:
             lines.append(
-                f"- {source_name} | Source ID: {source_id}"
+                f"- {source_name} | Source ID: {source_id}{suffix}"
             )
         elif source_id:
-            lines.append(f"- Source ID: {source_id}")
+            lines.append(f"- Source ID: {source_id}{suffix}")
         else:
-            lines.append(f"- {source_name}")
+            lines.append(f"- {source_name}{suffix}")
 
     if not lines:
         return answer
 
     return (
         str(answer or "").rstrip()
-        + "\\n\\n"
-        + "TEST RAG SOURCES:\\n"
-        + "\\n".join(lines)
+        + "\n\n"
+        + "TEST RAG SOURCES:\n"
+        + "\n".join(lines)
     )
 
 
@@ -2035,28 +2611,58 @@ async def answer_chat(
         and _wants_business_idea_discovery(message)
     )
 
+    # Load recent conversation BEFORE retrieval. This prevents short follow-up
+    # questions from drifting into unrelated projects.
+    recent_conversation = (
+        _load_recent_conversation(visitor_id, limit=12)
+        if client_logged_in
+        else []
+    )
+
+    contextual_followup = (
+        client_logged_in
+        and not assessment
+        and not business_idea_discovery
+        and _is_contextual_followup(message)
+    )
+
+    followup_meta = {
+        "active_topic": None,
+        "anchors": [],
+        "family": None,
+        "metric": "general",
+        "exact_sources": 0,
+        "proxy_sources": 0,
+    }
+
     if assessment:
         retrieval_query = _business_assessment_search_query(assessment)
+        ctx = retrieve_context(
+            retrieval_query,
+            limit=8,
+            include_private=client_logged_in,
+        )
+
     elif business_idea_discovery:
         retrieval_query = _business_idea_discovery_search_query(message)
-    else:
-        retrieval_query = message
-
-    # Public users get public knowledge only.
-    # Logged-in clients/admins get public + private/internal wiki knowledge.
-    #
-    # Business idea discovery uses a dedicated balanced cross-industry
-    # retriever. It deliberately excludes Malriffaie products/services so
-    # the model recommends actual business categories rather than consultancy
-    # products such as Marketing Strategy or Retainer Membership.
-    if business_idea_discovery:
         ctx = _retrieve_balanced_business_discovery_context(
             message=message,
             include_private=client_logged_in,
             per_industry_limit=2,
             max_total=16,
         )
+
+    elif contextual_followup:
+        retrieval_query = message
+        ctx, followup_meta = _retrieve_followup_business_context(
+            message=message,
+            recent_rows=recent_conversation,
+            include_private=client_logged_in,
+            limit=8,
+        )
+
     else:
+        retrieval_query = message
         ctx = retrieve_context(
             retrieval_query,
             limit=8,
@@ -2069,25 +2675,26 @@ async def answer_chat(
             "query": retrieval_query,
             "client_logged_in": client_logged_in,
             "business_idea_discovery": business_idea_discovery,
+            "contextual_followup": contextual_followup,
+            "followup_meta": followup_meta,
             "knowledge_count": len(ctx.get("knowledge") or []),
-            "discovery_meta": ctx.get("discovery_meta") if business_idea_discovery else None,
+            "discovery_meta": (
+                ctx.get("discovery_meta")
+                if business_idea_discovery
+                else None
+            ),
             "sources": [
                 {
                     "source_id": row.get("source_id"),
                     "source_type": row.get("source_type"),
                     "access_level": _row_access_level(row),
+                    "match_level": row.get("_rag_match_level"),
                     "preview": str(row.get("content") or "")[:160],
                 }
                 for row in (ctx.get("knowledge") or [])[:8]
             ],
         },
         flush=True,
-    )
-
-    recent_conversation = (
-        _load_recent_conversation(visitor_id)
-        if client_logged_in
-        else []
     )
 
     # Start with no product recommendations. Products are only attached
@@ -2197,6 +2804,7 @@ async def answer_chat(
         # 6. Only genuine recommendation requests use product recommendations.
         elif (
             not business_idea_discovery
+            and not contextual_followup
             and _wants_recommendation(message)
         ):
             answer, recommended = _recommendation_answer(
@@ -2273,27 +2881,35 @@ async def answer_chat(
             )
 
         else:
-            prompt += "\n\nProducts:\n" + "\n".join(
-                [
-                    f"- {p.get('name')} | "
-                    f"{_format_price(p.get('price'), p.get('currency'))} | "
-                    f"{p.get('description', '')}"
-                    for p in ctx["products"]
-                ]
-            )
+            if contextual_followup and followup_meta.get("active_topic"):
+                prompt += (
+                    "\n\nFOLLOW-UP KNOWLEDGE CONTEXT:\n"
+                    + _format_followup_knowledge_context(
+                        ctx.get("knowledge") or []
+                    )
+                )
+            else:
+                prompt += "\n\nProducts:\n" + "\n".join(
+                    [
+                        f"- {p.get('name')} | "
+                        f"{_format_price(p.get('price'), p.get('currency'))} | "
+                        f"{p.get('description', '')}"
+                        for p in ctx["products"]
+                    ]
+                )
 
-            prompt += "\n\nServices:\n" + "\n".join(
-                [
-                    f"- {s.get('name')} | "
-                    f"{_format_price(s.get('price'), s.get('currency'))} | "
-                    f"{s.get('description', '')}"
-                    for s in ctx["services"]
-                ]
-            )
+                prompt += "\n\nServices:\n" + "\n".join(
+                    [
+                        f"- {s.get('name')} | "
+                        f"{_format_price(s.get('price'), s.get('currency'))} | "
+                        f"{s.get('description', '')}"
+                        for s in ctx["services"]
+                    ]
+                )
 
-            prompt += "\n\nKnowledge context:\n" + "\n---\n".join(
-                [k.get("content", "")[:1200] for k in ctx["knowledge"]]
-            )
+                prompt += "\n\nKnowledge context:\n" + "\n---\n".join(
+                    [k.get("content", "")[:1200] for k in ctx["knowledge"]]
+                )
 
         knowledge_count = len(ctx.get("knowledge") or [])
 
@@ -2366,6 +2982,50 @@ async def answer_chat(
         if recent_prompt:
             prompt += "\n\nRecent conversation:\n" + recent_prompt
 
+        if contextual_followup and followup_meta.get("active_topic"):
+            active_topic = followup_meta.get("active_topic")
+            family = followup_meta.get("family") or "unknown"
+            metric = followup_meta.get("metric") or "general"
+            exact_sources = followup_meta.get("exact_sources") or 0
+            proxy_sources = followup_meta.get("proxy_sources") or 0
+
+            prompt += (
+                "\n\nACTIVE BUSINESS TOPIC LOCK:\n"
+                f"Selected business/topic: {active_topic}\n"
+                f"Business family: {family}\n"
+                f"Current information type requested: {metric}\n"
+                f"Exact-topic knowledge sources available: {exact_sources}\n"
+                f"Similar-business proxy sources available: {proxy_sources}\n\n"
+                "Rules for this follow-up:\n"
+                "1. Keep the answer about the selected business/topic. Never silently switch "
+                "to another business, feasibility study, or industry.\n"
+                "2. Use [Evidence level: exact topic] first.\n"
+                "3. If an exact figure is unavailable, you MAY use a number from "
+                "[Evidence level: similar business] or [Evidence level: broader industry proxy] "
+                "only as a clearly labelled proxy/benchmark.\n"
+                "4. If using a proxy, explicitly say it comes from a similar business and is "
+                "not an exact confirmed figure for the selected business.\n"
+                "5. Never present a proxy as a confirmed salary, staffing requirement, cost, "
+                "revenue, profit, or budget for the selected business.\n"
+                "6. Borrow only the SAME TYPE of information requested. A salary question may "
+                "borrow salary/payroll evidence, but never an unrelated project-cost number.\n"
+                "7. Do not convert total payroll into per-person salary, or per-person salary into "
+                "total payroll, unless the approved source clearly provides the required headcount "
+                "and relationship. Preserve monthly/yearly and per-person/total units exactly.\n"
+                "8. Similarity must be operationally sensible. Restaurant/cafe/bakery/takeaway "
+                "may share food-service benchmarks. Hotel F&B can be used only for comparable "
+                "food-and-beverage roles/costs, not whole-hotel costs. Food-processing data must "
+                "not be treated as restaurant front-of-house data.\n"
+                "9. For cap/light manufacturing, prefer cap/headwear/apparel/garment/textile/"
+                "light-manufacturing evidence. Never borrow healthcare, nursing, hotel, or "
+                "unrelated food-project figures.\n"
+                "10. If neither exact nor sensible proxy evidence exists, say the requested "
+                "information is not available in the approved knowledge. Do not guess.\n"
+                "11. Confidence: High = exact-topic evidence; Medium = close similar-business "
+                "evidence; Low = broader proxy evidence. Include the confidence when a numerical "
+                "proxy is used."
+            )
+
         if recent_industry:
             prompt += (
                 f"\n\nCurrent business topic from the recent conversation: "
@@ -2373,9 +3033,10 @@ async def answer_chat(
             )
 
         prompt += (
-            "\n\nConversation rule: If the customer's current message is a short follow-up "
-            "such as 'yes', 'yes please', 'continue', 'okay', or similar, interpret it using "
-            "the recent conversation instead of searching unrelated knowledge."
+            "\n\nConversation rule: Treat short follow-ups such as staffing, salary, "
+            "expenses, equipment, rent, revenue, profit, cost breakdown, 'yes', 'continue', "
+            "or 'what about this?' as questions about the most recently selected CUSTOMER "
+            "business topic. Never let an unrelated assistant answer redefine that topic."
         )
 
         prompt += f"\n\nCustomer message: {message}\nAnswer:"
