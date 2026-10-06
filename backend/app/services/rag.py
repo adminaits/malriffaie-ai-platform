@@ -1190,77 +1190,139 @@ def _business_assessment_profile(assessment: dict) -> str:
 
 def _wants_business_idea_discovery(message: str) -> bool:
     """
-    Detect broad idea-discovery questions where the client has a budget
-    but has NOT selected a specific industry yet.
+    Detect broad business-idea discovery by meaning/components instead of
+    relying mainly on exact phrases.
 
-    Examples:
+    Examples that should return True:
     - "I have 20,000 BHD. What business can I start?"
-    - "What profitable business can I start with this budget?"
-    - "Suggest a business idea for 15,000 BD."
+    - "I have 20000 BD to start the business. Can you share suggestions?"
+    - "Suggest a business for my 15k budget."
+    - "Which business would be suitable with this investment?"
 
-    These questions should NOT trigger the Business Assessment intake.
-    The assistant should first compare suitable business ideas.
+    If the client already names a supported industry, return False so the
+    industry-specific guidance / assessment flow can take over.
     """
-    low = (message or "").lower().strip()
+    raw = str(message or "").strip()
 
-    # If the user has already named a supported industry, this is no longer
-    # general discovery; the normal industry-specific assessment flow can apply.
-    if _detect_industry(message):
+    if not raw:
         return False
 
-    discovery_phrases = [
-        "what business can i start",
-        "which business can i start",
-        "what business should i start",
-        "which business should i start",
-        "what profitable business",
-        "which profitable business",
-        "profitable business i can start",
-        "business can i start with",
-        "business should i start with",
-        "business ideas for",
-        "business idea for",
-        "suggest a business",
-        "suggest business",
-        "recommend a business",
-        "recommend business",
-        "best business to start",
-        "good business to start",
-        "business opportunity for my budget",
-        "business opportunities for my budget",
-        "i have a budget",
-        "my budget is",
-        "my approximate budget is",
-        "budget to start a business",
-        "budget for a business",
+    low = raw.lower()
+
+    # Normalize punctuation and repeated whitespace while preserving numbers.
+    normalized = re.sub(r"[?.,!;:()\[\]{}]", " ", low)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+
+    # Once a supported industry is explicitly named, this is no longer broad
+    # discovery. Example: "I have 20,000 BHD to start a salon."
+    if _detect_industry(raw):
+        return False
+
+    # Support common spelling variations in free-form customer chat.
+    business_terms = [
+        "business",
+        "buisness",
+        "buissness",
+        "venture",
+        "startup",
+        "start-up",
+        "company",
+        "project",
     ]
 
-    if any(phrase in low for phrase in discovery_phrases):
-        return True
+    start_terms = [
+        "start",
+        "starting",
+        "open",
+        "opening",
+        "setup",
+        "set up",
+        "launch",
+        "launching",
+        "establish",
+        "establishing",
+        "build",
+        "create",
+    ]
 
-    # Flexible fallback: budget/capital + broad business/start intent,
-    # but still no named industry.
+    discovery_terms = [
+        "suggest",
+        "suggestion",
+        "suggestions",
+        "recommend",
+        "recommendation",
+        "recommendations",
+        "idea",
+        "ideas",
+        "option",
+        "options",
+        "which",
+        "what business",
+        "what can i start",
+        "what should i start",
+        "category",
+        "categories",
+        "profitable",
+        "suitable",
+        "best",
+        "good business",
+        "opportunity",
+        "opportunities",
+        "advise",
+        "advice",
+        "guide",
+        "guidance",
+    ]
+
     has_budget = bool(
         re.search(
-            r"\b(?:bhd|bd|budget|capital|investment)\b",
-            low,
+            r"\b(?:bhd|bd|budget|capital|investment|funds|funding)\b",
+            normalized,
             flags=re.IGNORECASE,
         )
     )
 
-    has_business_intent = any(
-        phrase in low
-        for phrase in [
-            "start a business",
-            "start business",
-            "business idea",
-            "business opportunity",
-            "profitable business",
-            "new business",
-        ]
-    )
+    has_business = any(term in normalized for term in business_terms)
+    has_start = any(term in normalized for term in start_terms)
+    has_discovery = any(term in normalized for term in discovery_terms)
 
-    return has_budget and has_business_intent
+    # Direct discovery patterns. These work even if no budget is stated.
+    direct_patterns = [
+        r"\bwhat\s+(?:type\s+of\s+)?business\b.*\bstart\b",
+        r"\bwhich\s+(?:type\s+of\s+)?business\b.*\bstart\b",
+        r"\bwhat\s+business\b.*\bshould\b",
+        r"\bwhich\s+business\b.*\bshould\b",
+        r"\bsuggest(?:ion|ions)?\b.*\bbusiness\b",
+        r"\bbusiness\b.*\bsuggest(?:ion|ions)?\b",
+        r"\brecommend(?:ation|ations)?\b.*\bbusiness\b",
+        r"\bbusiness\b.*\brecommend(?:ation|ations)?\b",
+        r"\bbusiness\s+idea(?:s)?\b",
+        r"\bbusiness\s+opportunit(?:y|ies)\b",
+        r"\bprofitable\s+business\b",
+        r"\bbest\s+business\b",
+        r"\bgood\s+business\b",
+    ]
+
+    if any(
+        re.search(pattern, normalized, flags=re.IGNORECASE)
+        for pattern in direct_patterns
+    ):
+        return True
+
+    # Primary semantic rule:
+    # business context + start intent + either budget or discovery intent.
+    if has_business and has_start and (has_budget or has_discovery):
+        return True
+
+    # Example: "I have 20k BD, what can I start?"
+    if has_budget and has_start and has_discovery:
+        return True
+
+    # Example: "Suggest a business for this budget."
+    if has_budget and has_business and has_discovery:
+        return True
+
+    return False
 
 
 def _business_idea_discovery_search_query(message: str) -> str:
