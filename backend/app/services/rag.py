@@ -685,21 +685,96 @@ def _is_public_product_or_service_question(message: str) -> bool:
     return any(phrase in low for phrase in public_phrases)
 
 
-def _wants_booking(message: str) -> bool:
-    low = (message or "").lower()
+def _consultation_already_completed(message: str) -> bool:
+    """
+    Detect references to a consultation the customer already completed/booked.
 
-    return any(
-        phrase in low
-        for phrase in [
-            "book",
-            "booking",
-            "online consultation",
-            "book consultation",
-            "book an online consultation",
-            "appointment",
-            "schedule",
-        ]
+    This prevents sentences such as:
+      "I have done an online consultation already, I just want the details."
+    from being routed back into the booking flow.
+    """
+    low = " ".join(str(message or "").lower().split())
+
+    consultation_terms = [
+        "consultation",
+        "online consultation",
+        "appointment",
+        "meeting",
+    ]
+
+    completed_terms = [
+        "already",
+        "already done",
+        "have done",
+        "had a consultation",
+        "had the consultation",
+        "completed",
+        "finished",
+        "attended",
+        "booked already",
+        "already booked",
+    ]
+
+    another_booking_terms = [
+        "book another",
+        "book again",
+        "another consultation",
+        "new consultation",
+        "schedule another",
+        "another appointment",
+    ]
+
+    if any(term in low for term in another_booking_terms):
+        return False
+
+    return (
+        any(term in low for term in consultation_terms)
+        and any(term in low for term in completed_terms)
     )
+
+
+def _wants_booking(message: str) -> bool:
+    low = " ".join(str(message or "").lower().split())
+
+    # Mentioning a consultation that already happened is not a new booking
+    # request. Let the conversation continue with the active business topic.
+    if _consultation_already_completed(low):
+        return False
+
+    exact_booking_requests = {
+        "online consultation",
+        "book consultation",
+        "booking",
+        "appointment",
+    }
+
+    if low in exact_booking_requests:
+        return True
+
+    explicit_booking_phrases = [
+        "book",
+        "booking",
+        "book consultation",
+        "book an online consultation",
+        "book online consultation",
+        "book another",
+        "book again",
+        "want an online consultation",
+        "want a consultation",
+        "need an online consultation",
+        "need a consultation",
+        "would like an online consultation",
+        "would like a consultation",
+        "schedule",
+        "schedule a consultation",
+        "schedule an appointment",
+        "make an appointment",
+    ]
+
+    # A bare historical mention of "online consultation" is deliberately NOT
+    # sufficient unless the whole message is the request or it contains an
+    # explicit want/book/schedule intent above.
+    return any(phrase in low for phrase in explicit_booking_phrases)
 
 
 def _booking_answer(services: list[dict]) -> str:
@@ -2107,16 +2182,47 @@ def _has_explicit_business_topic(message: str) -> bool:
     return any(_contains_search_term(low, marker) for marker in explicit_markers)
 
 
+def _wants_business_topic_details(message: str) -> bool:
+    """
+    Detect when the customer has selected/named a business and wants an
+    overview/details from the knowledge base rather than a sales response.
+    """
+    low = _normalize_search_text(message)
+
+    if not low or not _has_explicit_business_topic(low):
+        return False
+
+    detail_terms = [
+        "share details",
+        "share the details",
+        "details please",
+        "more details",
+        "tell me more",
+        "tell me about",
+        "explain",
+        "overview",
+        "information about",
+        "share about",
+        "i prefer",
+        "i choose",
+        "i chose",
+        "i selected",
+        "want the details",
+    ]
+
+    return any(term in low for term in detail_terms)
+
+
 def _is_contextual_followup(message: str) -> bool:
     low = _normalize_search_text(message)
 
     if not low:
         return False
 
-    # If the current message itself clearly names the business, treat it as a
-    # new/explicit topic message, not as an ambiguous follow-up.
+    # A named business + request for details should use the business advisory
+    # RAG path, not the generic products/services path.
     if _has_explicit_business_topic(low):
-        return False
+        return _wants_business_topic_details(low)
 
     markers = [
         "how many staff", "how many employees", "staff salary", "staff salaries",
@@ -2125,7 +2231,8 @@ def _is_contextual_followup(message: str) -> bool:
         "other cost", "average breakdown", "cost breakdown", "breakdown for this",
         "what about", "how much", "what will be", "what would be",
         "can you share", "can you explain", "more details", "continue",
-        "yes please",
+        "yes please", "just want details", "just want the details",
+        "i just want details", "i just want the details",
     ]
 
     if any(marker in low for marker in markers):
@@ -2149,7 +2256,7 @@ def _topic_anchor_terms(text_value: str) -> list[str]:
         "more", "could", "should", "like", "idea", "option", "category",
         "selected", "select", "explore", "further", "please", "explain",
         "details", "detail", "start", "starting", "business", "company",
-        "okay", "ok",
+        "okay", "ok", "share", "information", "overview", "please",
     }
 
     anchors = []
@@ -2310,7 +2417,15 @@ def _retrieve_followup_business_context(
     enough evidence for the requested metric, add carefully-labelled proxy
     evidence from similar businesses.
     """
-    topic_message, anchors, family = _find_recent_business_topic(recent_rows)
+    # Prefer the business explicitly named in the CURRENT message. If the
+    # current message is generic, fall back to the most recent customer topic.
+    if _has_explicit_business_topic(message):
+        topic_message = str(message or "").strip()
+        anchors = _topic_anchor_terms(topic_message)
+        family = _detect_business_family(topic_message)
+    else:
+        topic_message, anchors, family = _find_recent_business_topic(recent_rows)
+
     metric = _resolve_followup_metric(message, recent_rows)
 
     meta = {
@@ -2376,7 +2491,8 @@ def _retrieve_followup_business_context(
     selected = []
     seen_chunks = set()
 
-    # Prefer up to 5 exact-topic chunks.
+    # Prefer up to 10 exact-topic chunks so a detailed business overview can
+    # cover more sections of the matching feasibility/project source.
     for _, row in exact_candidates:
         source_key = str(row.get("source_id") or row.get("id") or "")
         content_key = (source_key, str(row.get("content") or "")[:160])
@@ -2390,7 +2506,7 @@ def _retrieve_followup_business_context(
         selected.append(row_copy)
         seen_chunks.add(content_key)
 
-        if len(selected) >= min(5, limit):
+        if len(selected) >= min(10, limit):
             break
 
     # Fill remaining slots using sensible proxy evidence only.
@@ -2929,6 +3045,13 @@ async def answer_chat(
         )
     )
 
+    business_detail_mode = (
+        client_logged_in
+        and not assessment
+        and not business_idea_discovery
+        and _wants_business_topic_details(message)
+    )
+
     contextual_followup = (
         client_logged_in
         and not assessment
@@ -2936,6 +3059,8 @@ async def answer_chat(
         and (
             _is_contextual_followup(message)
             or marketing_advice_mode
+            or business_detail_mode
+            or _consultation_already_completed(message)
         )
     )
 
@@ -2977,7 +3102,7 @@ async def answer_chat(
             message=followup_retrieval_message,
             recent_rows=recent_conversation,
             include_private=client_logged_in,
-            limit=8,
+            limit=12,
         )
 
     elif marketing_advice_mode:
@@ -3010,6 +3135,7 @@ async def answer_chat(
             "marketing_choice": marketing_choice,
             "marketing_choice_offer": marketing_choice_offer,
             "marketing_advice_mode": marketing_advice_mode,
+            "business_detail_mode": business_detail_mode,
             "contextual_followup": contextual_followup,
             "followup_meta": followup_meta,
             "knowledge_count": len(ctx.get("knowledge") or []),
@@ -3121,6 +3247,8 @@ async def answer_chat(
     elif (
         answer is None
         and not business_idea_discovery
+        and not contextual_followup
+        and not _consultation_already_completed(message)
         and _wants_booking(message)
     ):
         answer = _booking_answer(ctx["services"])
@@ -3152,13 +3280,23 @@ async def answer_chat(
             "describe",
         ]
 
-        # 4. Specific service detail questions.
-        if service and any(k in message.lower() for k in detail_words):
+        # 4. Specific service detail questions. Do not let a historical
+        # consultation mention override an active business-topic follow-up.
+        if (
+            service
+            and not contextual_followup
+            and not _consultation_already_completed(message)
+            and any(k in message.lower() for k in detail_words)
+        ):
             answer = _service_detail_answer(service)
             recommended = []
 
         # 5. Specific product detail questions.
-        elif product and any(k in message.lower() for k in detail_words + ["buy"]):
+        elif (
+            product
+            and not contextual_followup
+            and any(k in message.lower() for k in detail_words + ["buy"])
+        ):
             answer = _product_detail_answer(product)
             recommended = [product]
 
@@ -3335,6 +3473,19 @@ async def answer_chat(
                 "10. Finish by asking which suggested business the client wants to explore. "
                 "After the client chooses one, the structured Business Assessment can be used.\n"
                 "11. Do not redirect to consultation or products unless the client asks for them."
+            )
+
+        if business_detail_mode:
+            prompt += (
+                "\n\nBUSINESS DETAIL MODE:\n"
+                "The customer has selected a specific business and is asking for useful details from the approved knowledge base.\n"
+                "1. Answer the selected business directly; do not turn the response into a list of Malriffaie products or services.\n"
+                "2. Summarize as much RELEVANT retrieved information as is available for this business.\n"
+                "3. Where supported by the knowledge, cover: business concept, target market/customers, setup or facility requirements, equipment/machinery, staffing, operating model, costs/financial considerations, marketing/sales channels, risks, licensing/compliance, and practical next steps.\n"
+                "4. Do not invent missing figures or claim information is current Bahrain market data unless the supplied source actually supports Bahrain and recency.\n"
+                "5. If a section is not supported by the retrieved knowledge, omit it or clearly say that specific information is not available.\n"
+                "6. Do not recommend booking a consultation unless the customer explicitly asks for another consultation.\n"
+                "7. Keep the answer practical and structured with short headings or bullets."
             )
 
         if marketing_advice_mode:
