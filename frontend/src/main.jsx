@@ -1840,6 +1840,29 @@ function shouldOpenBusinessAssessment(message) {
   const hasBusiness = businessTerms.some(term => low.includes(term));
   const hasIntent = intentTerms.some(term => low.includes(term));
 
+  // If the customer has just chosen one of the AI-suggested businesses and
+  // wants to explore/understand it, keep the conversation in chat first.
+  // Example: "I prefer retail business, can you share the details?"
+  const explorationTerms = [
+    'i prefer',
+    'i choose',
+    'i chose',
+    'i selected',
+    'share details',
+    'share the details',
+    'tell me more',
+    'more details',
+    'explain the details',
+    'give me the details',
+    'want the details'
+  ];
+
+  const isExploringChosenBusiness = explorationTerms.some(term => low.includes(term));
+
+  if (isExploringChosenBusiness) {
+    return false;
+  }
+
   // Important: no known industry = no assessment popup.
   // This lets questions such as:
   // "I have 20,000 BHD. What profitable business can I start?"
