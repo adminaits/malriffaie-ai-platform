@@ -729,8 +729,234 @@ def _booking_answer(services: list[dict]) -> str:
     )
 
 
+MARKETING_CHOICE_MARKER = "[MARKETING_CHOICE]"
+
+
+def _is_marketing_topic(message: str) -> bool:
+    low = " ".join(str(message or "").lower().split())
+
+    marketing_terms = [
+        "marketing",
+        "marketing strategy",
+        "marketing strategies",
+        "marketing plan",
+        "promotion",
+        "promotional",
+        "advertising",
+        "social media",
+        "customer acquisition",
+        "branding",
+        "brand awareness",
+        "sales strategy",
+        "go to market",
+        "go-to-market",
+    ]
+
+    return any(term in low for term in marketing_terms)
+
+
+def _declines_product_sales(message: str) -> bool:
+    """Detect an explicit request for advice without buying a product/package."""
+    low = " ".join(str(message or "").lower().split())
+
+    phrases = [
+        "do not want to buy",
+        "don't want to buy",
+        "dont want to buy",
+        "would not like to buy",
+        "wouldn't like to buy",
+        "not like to buy",
+        "not interested in buying",
+        "not interested to buy",
+        "i don't want products",
+        "i dont want products",
+        "i do not want products",
+        "no products please",
+        "without buying",
+        "just give me advice",
+        "just give advice",
+        "just advice",
+        "only advice",
+        "just suggestions",
+        "only suggestions",
+    ]
+
+    return any(phrase in low for phrase in phrases)
+
+
+def _has_explicit_marketing_product_intent(message: str) -> bool:
+    """
+    Detect when the customer clearly wants the Malriffaie marketing product.
+
+    A generic sentence such as "What marketing strategies can we use?" is
+    intentionally NOT product intent; it should offer the two-path chooser.
+    """
+    low = " ".join(str(message or "").lower().split())
+
+    if not _is_marketing_topic(low):
+        return False
+
+    if _declines_product_sales(low):
+        return False
+
+    product_terms = [
+        "buy",
+        "purchase",
+        "order",
+        "checkout",
+        "buy now",
+        "package",
+        "product",
+        "price",
+        "how much is",
+        "availability",
+        "available to buy",
+        "marketing strategy package",
+        "marketing package",
+        "your marketing service",
+        "your marketing product",
+    ]
+
+    return any(term in low for term in product_terms)
+
+
+def _should_offer_marketing_choice(message: str) -> bool:
+    """
+    Offer two routes for an ambiguous marketing request:
+    1) Malriffaie Marketing Strategy product
+    2) AI suggestions from approved knowledge
+    """
+    text = str(message or "").strip()
+
+    if not text:
+        return False
+
+    if text.upper().startswith(MARKETING_CHOICE_MARKER):
+        return False
+
+    if not _is_marketing_topic(text):
+        return False
+
+    if _has_explicit_marketing_product_intent(text):
+        return False
+
+    if _declines_product_sales(text):
+        return False
+
+    return True
+
+
+def _marketing_choice_answer() -> str:
+    return "\n".join(
+        [
+            MARKETING_CHOICE_MARKER,
+            "I can help you with marketing in two ways:",
+            "",
+            "1. View the Malriffaie Marketing Strategy Package - see the product details, price, and purchase option.",
+            "2. Get AI Marketing Suggestions - I will use your current business topic and relevant approved knowledge-base information to suggest practical marketing strategies.",
+            "",
+            "Please choose option 1 or 2.",
+        ]
+    )
+
+
+def _parse_marketing_choice(
+    message: str,
+    recent_rows: list[dict] | None = None,
+) -> str | None:
+    """
+    Parse either the structured frontend action or a typed 1/2 response.
+    Typed 1/2 is accepted only when the immediately preceding assistant answer
+    was the marketing chooser.
+    """
+    raw = str(message or "").strip()
+    low = " ".join(raw.lower().split())
+
+    if low.startswith(MARKETING_CHOICE_MARKER.lower()):
+        tail = low[len(MARKETING_CHOICE_MARKER):].strip(" :-")
+
+        if tail in {"1", "product", "package", "buy", "view product"}:
+            return "product"
+
+        if tail in {
+            "2",
+            "advice",
+            "suggestions",
+            "ai advice",
+            "ai suggestions",
+            "knowledge",
+            "knowledge base",
+        }:
+            return "advice"
+
+        return None
+
+    # Natural-language explicit choices are also supported.
+    if low in {
+        "view marketing strategy package",
+        "marketing strategy package",
+        "choose product",
+        "choose package",
+        "option 1 product",
+    }:
+        return "product"
+
+    if low in {
+        "get ai marketing suggestions",
+        "ai marketing suggestions",
+        "choose ai suggestions",
+        "choose advice",
+        "option 2 advice",
+    }:
+        return "advice"
+
+    # Plain 1/2 should only act as a choice if the latest assistant reply was
+    # the chooser. This prevents an unrelated "1" or "2" from being routed.
+    latest_assistant = ""
+
+    for row in reversed(recent_rows or []):
+        response = str(row.get("response") or "").strip()
+        if response:
+            latest_assistant = response
+            break
+
+    if MARKETING_CHOICE_MARKER in latest_assistant:
+        if low in {"1", "1.", "option 1", "number 1", "first", "product"}:
+            return "product"
+
+        if low in {"2", "2.", "option 2", "number 2", "second", "advice", "suggestions"}:
+            return "advice"
+
+    return None
+
+
+def _find_marketing_product(products: list[dict]) -> dict | None:
+    """Prefer the dedicated Marketing Strategy product, then any marketing item."""
+    for product in products or []:
+        name = str(product.get("name") or "").lower()
+        description = str(product.get("description") or "").lower()
+
+        if "marketing" in name and "strategy" in name:
+            return product
+
+        if "marketing strategy" in f"{name} {description}":
+            return product
+
+    for product in products or []:
+        text = f"{product.get('name', '')} {product.get('description', '')}".lower()
+        if "marketing" in text:
+            return product
+
+    return None
+
+
 def _matched_product(message: str, products: list[dict]) -> dict | None:
-    low = message.lower()
+    low = str(message or "").lower()
+
+    # Marketing is intentionally ambiguous unless the user clearly asks for
+    # the product/package. Generic marketing questions use the two-option flow.
+    if _is_marketing_topic(low) and not _has_explicit_marketing_product_intent(low):
+        return None
 
     for product in sorted(products, key=lambda p: len(p.get("name") or ""), reverse=True):
         name = (product.get("name") or "").lower()
@@ -742,11 +968,8 @@ def _matched_product(message: str, products: list[dict]) -> dict | None:
             if "feasibility" in (product.get("name") or "").lower():
                 return product
 
-    if "marketing" in low:
-        for product in products:
-            text = f"{product.get('name', '')} {product.get('description', '')}".lower()
-            if "marketing" in text:
-                return product
+    if "marketing" in low and _has_explicit_marketing_product_intent(low):
+        return _find_marketing_product(products)
 
     has_hr_intent = bool(
         re.search(r"\bhr\b", low)
@@ -1785,6 +2008,12 @@ FOLLOWUP_METRIC_TERMS = {
     "revenue": ["revenue", "sales", "turnover", "income"],
     "profit": ["profit", "margin", "net income", "gross profit"],
     "licensing": ["license", "licence", "licensing", "permit", "approval"],
+    "marketing": [
+        "marketing", "marketing strategy", "marketing strategies",
+        "marketing plan", "promotion", "advertising", "social media",
+        "customer acquisition", "branding", "brand awareness",
+        "sales strategy", "go to market", "go-to-market",
+    ],
 }
 
 
@@ -2681,11 +2910,33 @@ async def answer_chat(
         else []
     )
 
+    marketing_choice = _parse_marketing_choice(
+        message,
+        recent_conversation,
+    )
+
+    marketing_choice_offer = (
+        not assessment
+        and marketing_choice is None
+        and _should_offer_marketing_choice(message)
+    )
+
+    marketing_advice_mode = (
+        marketing_choice == "advice"
+        or (
+            _is_marketing_topic(message)
+            and _declines_product_sales(message)
+        )
+    )
+
     contextual_followup = (
         client_logged_in
         and not assessment
         and not business_idea_discovery
-        and _is_contextual_followup(message)
+        and (
+            _is_contextual_followup(message)
+            or marketing_advice_mode
+        )
     )
 
     followup_meta = {
@@ -2715,12 +2966,31 @@ async def answer_chat(
         )
 
     elif contextual_followup:
-        retrieval_query = message
+        followup_retrieval_message = (
+            "marketing strategy marketing plan promotion advertising social media "
+            "branding customer acquisition sales strategy cost effective"
+            if marketing_choice == "advice"
+            else message
+        )
+        retrieval_query = followup_retrieval_message
         ctx, followup_meta = _retrieve_followup_business_context(
-            message=message,
+            message=followup_retrieval_message,
             recent_rows=recent_conversation,
             include_private=client_logged_in,
             limit=8,
+        )
+
+    elif marketing_advice_mode:
+        # Public/non-contextual advice can still search approved public
+        # marketing knowledge even though there is no logged-in topic lock.
+        retrieval_query = (
+            "marketing strategy marketing plan promotion advertising social media "
+            "branding customer acquisition sales strategy cost effective"
+        )
+        ctx = retrieve_context(
+            retrieval_query,
+            limit=8,
+            include_private=client_logged_in,
         )
 
     else:
@@ -2737,6 +3007,9 @@ async def answer_chat(
             "query": retrieval_query,
             "client_logged_in": client_logged_in,
             "business_idea_discovery": business_idea_discovery,
+            "marketing_choice": marketing_choice,
+            "marketing_choice_offer": marketing_choice_offer,
+            "marketing_advice_mode": marketing_advice_mode,
             "contextual_followup": contextual_followup,
             "followup_meta": followup_meta,
             "knowledge_count": len(ctx.get("knowledge") or []),
@@ -2798,6 +3071,32 @@ async def answer_chat(
     if assessment:
         recommended = []
 
+    # Marketing questions can be ambiguous: the client may want either the
+    # paid Marketing Strategy product or practical AI guidance. Offer both.
+    elif answer is None and marketing_choice_offer:
+        answer = _marketing_choice_answer()
+        recommended = []
+        used_knowledge = False
+
+    # Choice 1: show the Marketing Strategy product and purchase card.
+    elif answer is None and marketing_choice == "product":
+        marketing_product = _find_marketing_product(ctx.get("products") or [])
+
+        if marketing_product:
+            answer = _product_detail_answer(marketing_product)
+            recommended = [marketing_product]
+        else:
+            answer = (
+                "The Marketing Strategy Package is not currently available in the product catalog. "
+                "You can choose AI Marketing Suggestions instead, or contact support for help."
+            )
+            recommended = []
+
+        used_knowledge = False
+
+    # Choice 2 intentionally leaves answer=None so the RAG/AI advisory path
+    # below can generate knowledge-based marketing suggestions.
+
     # 1. Service-list/service-description questions.
     # This must be checked before product recommendation logic.
     elif (
@@ -2830,12 +3129,12 @@ async def answer_chat(
     elif answer is None:
         service = (
             None
-            if business_idea_discovery
+            if (business_idea_discovery or marketing_advice_mode)
             else _matched_service(message, ctx["services"])
         )
         product = (
             None
-            if business_idea_discovery
+            if (business_idea_discovery or marketing_advice_mode)
             else _matched_product(message, ctx["products"])
         )
 
@@ -2867,6 +3166,8 @@ async def answer_chat(
         elif (
             not business_idea_discovery
             and not contextual_followup
+            and not marketing_advice_mode
+            and marketing_choice is None
             and _wants_recommendation(message)
         ):
             answer, recommended = _recommendation_answer(
@@ -2941,6 +3242,22 @@ async def answer_chat(
                 "support. Do not treat Malriffaie consulting products or services "
                 "as businesses the client can start."
             )
+
+        elif marketing_advice_mode:
+            # Marketing advice must use relevant knowledge and the active
+            # business topic. Do not feed the product/service sales catalog
+            # into this advisory generation step.
+            if contextual_followup and followup_meta.get("active_topic"):
+                prompt += (
+                    "\n\nMARKETING ADVISORY KNOWLEDGE CONTEXT:\n"
+                    + _format_followup_knowledge_context(
+                        ctx.get("knowledge") or []
+                    )
+                )
+            else:
+                prompt += "\n\nMARKETING ADVISORY KNOWLEDGE CONTEXT:\n" + "\n---\n".join(
+                    [k.get("content", "")[:1200] for k in (ctx.get("knowledge") or [])]
+                )
 
         else:
             if contextual_followup and followup_meta.get("active_topic"):
@@ -3018,6 +3335,20 @@ async def answer_chat(
                 "10. Finish by asking which suggested business the client wants to explore. "
                 "After the client chooses one, the structured Business Assessment can be used.\n"
                 "11. Do not redirect to consultation or products unless the client asks for them."
+            )
+
+        if marketing_advice_mode:
+            prompt += (
+                "\n\nMARKETING ADVISORY MODE:\n"
+                "The client chose practical AI marketing guidance instead of the product path.\n"
+                "1. Give practical marketing strategies for the client's active business topic.\n"
+                "2. Use only the approved knowledge supplied in this prompt and relevant recent conversation.\n"
+                "3. Do not sell, promote, price, or recommend the Malriffaie Marketing Strategy Package in this answer.\n"
+                "4. If the client asked for cost-effective ideas, prioritize low-cost and measurable actions supported by the knowledge.\n"
+                "5. Keep the advice specific to the active business. Do not switch industries.\n"
+                "6. Do not invent current-market claims, statistics, costs, or performance results that are not supported by the approved context.\n"
+                "7. If useful knowledge is missing, say what is missing rather than turning the answer into a product sales response.\n"
+                "8. Structure the answer as clear actions, suggested channels, and practical next steps."
             )
 
         if assessment:
@@ -3101,7 +3432,14 @@ async def answer_chat(
             "business topic. Never let an unrelated assistant answer redefine that topic."
         )
 
-        prompt += f"\n\nCustomer message: {message}\nAnswer:"
+        customer_prompt_message = (
+            "Provide practical marketing strategy suggestions for the active business topic. "
+            "Use relevant approved knowledge and keep the recommendations cost-conscious where possible."
+            if marketing_choice == "advice"
+            else message
+        )
+
+        prompt += f"\n\nCustomer message: {customer_prompt_message}\nAnswer:"
 
         hf = _build_huggingface_client(cfg)
 
@@ -3207,6 +3545,11 @@ async def answer_chat(
 
     return {
         "answer": answer,
-        "products": [] if (assessment or business_idea_discovery) else recommended,
+        "products": [] if (
+            assessment
+            or business_idea_discovery
+            or marketing_choice_offer
+            or marketing_advice_mode
+        ) else recommended,
         "sources": ctx["knowledge"] if used_knowledge else [],
     }
