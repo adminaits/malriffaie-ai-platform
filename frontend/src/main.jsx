@@ -87,6 +87,75 @@ function ProductCard({ product }) {
   </div>;
 }
 
+const MARKETING_CHOICE_MARKER = '[MARKETING_CHOICE]';
+
+function isMarketingChoiceMessage(text) {
+  return String(text || '').includes(MARKETING_CHOICE_MARKER);
+}
+
+function cleanChatMessageText(text) {
+  const raw = String(text || '').trim();
+  const normalized = raw.toLowerCase();
+
+  if (normalized === `${MARKETING_CHOICE_MARKER.toLowerCase()} product`) {
+    return 'View Marketing Strategy Package';
+  }
+
+  if (normalized === `${MARKETING_CHOICE_MARKER.toLowerCase()} advice`) {
+    return 'Get AI Marketing Suggestions';
+  }
+
+  return raw
+    .replace(MARKETING_CHOICE_MARKER, '')
+    .trim();
+}
+
+function MarketingChoiceButtons({ onChoose, loading=false }) {
+  const buttonStyle = {
+    border: '1px solid currentColor',
+    background: 'transparent',
+    color: 'inherit',
+    borderRadius: 12,
+    padding: '10px 14px',
+    cursor: loading ? 'not-allowed' : 'pointer',
+    opacity: loading ? 0.6 : 1,
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 8
+  };
+
+  return (
+    <div
+      className="marketingChoiceActions"
+      style={{
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: 10,
+        marginTop: 14
+      }}
+    >
+      <button
+        type="button"
+        style={buttonStyle}
+        disabled={loading}
+        onClick={() => onChoose('product')}
+      >
+        <ShoppingCart size={16} /> View Marketing Strategy Package
+      </button>
+
+      <button
+        type="button"
+        style={buttonStyle}
+        disabled={loading}
+        onClick={() => onChoose('advice')}
+      >
+        <span aria-hidden="true">💡</span> Get AI Marketing Suggestions
+      </button>
+    </div>
+  );
+}
+
+
 function ChatPage() {
   const visitorId = useVisitorId();
   const [products, setProducts] = useState([]);
@@ -124,20 +193,19 @@ function ChatPage() {
     setMessages([]);
   }
 
-  async function submit(e) {
-    e.preventDefault();
+  async function sendHomeMessage(text, displayText = null) {
+    const cleanText = String(text || '').trim();
 
-    const text = input.trim();
+    if (!cleanText || loading) return;
 
-    if (!text || loading) return;
+    const shownText = displayText || cleanText;
 
-    setInput('');
-    setMessages(m => [...m, { role: 'user', text }]);
+    setMessages(m => [...m, { role: 'user', text: shownText }]);
     setLoading(true);
 
     try {
       const res = await sendChat({
-        message: text,
+        message: cleanText,
         visitor_id: visitorId,
         lang: navigator.language || 'en'
       });
@@ -162,6 +230,28 @@ function ChatPage() {
     } finally {
       setLoading(false);
     }
+  }
+
+  async function chooseHomeMarketingPath(choice) {
+    const displayText = choice === 'product'
+      ? 'View Marketing Strategy Package'
+      : 'Get AI Marketing Suggestions';
+
+    await sendHomeMessage(
+      `${MARKETING_CHOICE_MARKER} ${choice}`,
+      displayText
+    );
+  }
+
+  async function submit(e) {
+    e.preventDefault();
+
+    const text = input.trim();
+
+    if (!text || loading) return;
+
+    setInput('');
+    await sendHomeMessage(text);
   }
 
   return (
@@ -236,7 +326,14 @@ function ChatPage() {
 
           {messages.map((m, i) => (
             <div key={i} className={`msg ${m.role}`}>
-              <p>{m.text}</p>
+              <p>{cleanChatMessageText(m.text)}</p>
+
+              {m.role === 'assistant' && isMarketingChoiceMessage(m.text) && (
+                <MarketingChoiceButtons
+                  onChoose={chooseHomeMarketingPath}
+                  loading={loading}
+                />
+              )}
 
               {m.products?.length > 0 && (
                 <div className="cards">
@@ -2066,6 +2163,18 @@ function ClientDashboard() {
   }
 
 
+  async function chooseClientMarketingPath(choice) {
+    const displayText = choice === 'product'
+      ? 'View Marketing Strategy Package'
+      : 'Get AI Marketing Suggestions';
+
+    await sendClientMessage(
+      `${MARKETING_CHOICE_MARKER} ${choice}`,
+      displayText
+    );
+  }
+
+
   async function submit(e) {
     e.preventDefault();
 
@@ -2299,7 +2408,14 @@ function ClientDashboard() {
 
             {messages.map((m, i) => (
               <div key={i} className={`msg ${m.role}`}>
-                <p>{m.text}</p>
+                <p>{cleanChatMessageText(m.text)}</p>
+
+                {m.role === 'assistant' && isMarketingChoiceMessage(m.text) && (
+                  <MarketingChoiceButtons
+                    onChoose={chooseClientMarketingPath}
+                    loading={loading}
+                  />
+                )}
 
                 {m.products?.length > 0 && (
                   <div className="cards">
