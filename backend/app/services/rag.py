@@ -542,95 +542,167 @@ def _is_greeting(message: str) -> bool:
 
 
 
+def _normalize_catalog_message(message: str) -> str:
+    value = " ".join(str(message or "").lower().split())
+    value = re.sub(r"[?.,!;:()\[\]{}]", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
 def _wants_product_list(message: str) -> bool:
-    """Detect generic requests to see the available product catalogue."""
-    low = " ".join(str(message or "").lower().split())
-    normalized = re.sub(r"[?.,!;:()\\[\\]{}]", " ", low)
-    normalized = re.sub(r"\\s+", " ", normalized).strip()
+    """Detect natural requests for the available product catalogue."""
+    low = _normalize_catalog_message(message)
 
-    exact_requests = {
-        "product", "products", "product please", "products please",
-        "product list", "products list", "list product", "list products",
-        "list all products", "list of products", "all products",
-        "show product", "show products", "show me products",
-        "show me the products", "show all products", "show me all products",
-        "available products", "what product", "what products",
-        "what products do you have", "what products do you offer",
-        "what are your products", "which products",
-        "tell me about products", "tell me about your products",
-        "tell me the products", "describe products", "describe your products",
-        "explain products", "your products", "products available",
-        "products you provide", "products you offer", "what do you sell",
-        "catalog", "catalogue", "product catalog", "product catalogue",
-        "can i know about the products you have",
-        "can i know the products you have",
-        "can you tell me about your products",
-        "can you show me your products",
-    }
+    if not low:
+        return False
 
-    if normalized in exact_requests:
+    # Do not treat a named product/package question as a request for the full list.
+    named_product_terms = [
+        "feasibility study",
+        "marketing strategy package",
+        "marketing package",
+        "hr manual",
+        "human resources manual",
+        "partnership agreement",
+        "service level agreement",
+        "retainer membership",
+    ]
+
+    catalogue_markers = [
+        "all products",
+        "product list",
+        "products list",
+        "list products",
+        "list product",
+        "show products",
+        "show product",
+        "show me products",
+        "show me your products",
+        "available products",
+        "your products",
+        "what products",
+        "what product",
+        "which products",
+        "products do you have",
+        "product do you have",
+        "products do you offer",
+        "product do you offer",
+        "products you have",
+        "product you have",
+        "products you offer",
+        "product you offer",
+        "products you provide",
+        "product you provide",
+        "tell me about your products",
+        "can i know about the products",
+        "can i know about the product",
+        "can you list your products",
+        "can you list your product",
+        "catalog",
+        "catalogue",
+        "what do you sell",
+    ]
+
+    if any(marker in low for marker in catalogue_markers):
         return True
 
-    patterns = [
-        r"\\b(?:what|which|show|list|tell|describe|explain|know)\\b.*\\bproducts\\b",
-        r"\\bproducts\\b.*\\b(?:have|offer|provide|available|sell)\\b",
-        r"\\b(?:your|available)\\s+products\\b",
-    ]
-    return any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in patterns)
+    if any(term in low for term in named_product_terms):
+        return False
+
+    # Flexible fallback for natural wording such as
+    # "can you list your product and services please?"
+    has_product_word = bool(re.search(r"\bproducts?\b", low))
+    has_list_intent = bool(
+        re.search(
+            r"\b(list|show|tell|describe|explain|know|offer|provide|have|available)\b",
+            low,
+        )
+    )
+
+    return has_product_word and has_list_intent
 
 
 def _wants_service_list(message: str) -> bool:
-    """Detect generic requests to see Malriffaie's available services."""
-    low = " ".join(str(message or "").lower().split())
-    normalized = re.sub(r"[?.,!;:()\\[\\]{}]", " ", low)
-    normalized = re.sub(r"\\s+", " ", normalized).strip()
+    """Detect natural requests for Malriffaie's available service catalogue."""
+    low = _normalize_catalog_message(message)
 
-    exact_requests = {
-        "service", "services", "service please", "services please",
-        "list services", "list all services", "list of services",
-        "service list", "services list", "show services", "show me services",
-        "show all services", "show me all services", "available services",
-        "what services", "what service", "what services do you have",
-        "what services do you offer", "what are your services",
-        "which services", "which services are available",
-        "describe services", "describe the services", "describe your services",
-        "can you describe services", "can you describe the services",
-        "tell me about services", "tell me about your services",
-        "tell me the services", "explain services", "explain your services",
-        "services available", "services you provide", "services you offer",
-        "your services", "can i know about the services you have",
-        "can i know the services you have",
-        "can you tell me about the services you have",
-        "can you tell me about your services",
-        "can you show me your services",
-        "what kind of services do you offer",
-        "what type of services do you offer",
-    }
+    if not low:
+        return False
 
-    if normalized in exact_requests:
+    # Specific named-service questions should continue to the service-detail flow.
+    named_service_terms = [
+        "online consultation",
+        "consultation service",
+    ]
+
+    catalogue_markers = [
+        "all services",
+        "service list",
+        "services list",
+        "list services",
+        "list service",
+        "show services",
+        "show service",
+        "show me services",
+        "show me your services",
+        "available services",
+        "your services",
+        "what services",
+        "what service",
+        "which services",
+        "services do you have",
+        "service do you have",
+        "services do you offer",
+        "service do you offer",
+        "services you have",
+        "service you have",
+        "services you offer",
+        "service you offer",
+        "services you provide",
+        "service you provide",
+        "tell me about your services",
+        "can i know about the services",
+        "can i know about the service",
+        "can you list your services",
+        "can you list your service",
+        "what kind of services",
+        "what type of services",
+    ]
+
+    if any(marker in low for marker in catalogue_markers):
         return True
 
-    specific_terms = [
-        "online consultation", "consultation service", "feasibility study",
-        "marketing strategy package", "hr manual", "human resources manual",
-        "retainer membership", "partnership agreement",
-        "service level agreement",
-    ]
+    if any(term in low for term in named_service_terms):
+        return False
 
-    if any(term in normalized for term in specific_terms):
-        generic_markers = [
-            "all services", "services do you have", "services do you offer",
-            "your services", "list services", "show services",
-        ]
-        if not any(marker in normalized for marker in generic_markers):
-            return False
+    has_service_word = bool(re.search(r"\bservices?\b", low))
+    has_list_intent = bool(
+        re.search(
+            r"\b(list|show|tell|describe|explain|know|offer|provide|have|available)\b",
+            low,
+        )
+    )
 
-    patterns = [
-        r"\\b(?:what|which|show|list|tell|describe|explain|know)\\b.*\\bservices\\b",
-        r"\\bservices\\b.*\\b(?:have|offer|provide|available)\\b",
-        r"\\b(?:your|available)\\s+services\\b",
-    ]
-    return any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in patterns)
+    return has_service_word and has_list_intent
+
+
+def _wants_product_and_service_list(message: str) -> bool:
+    """Detect requests asking for BOTH products and services in one message."""
+    low = _normalize_catalog_message(message)
+
+    has_product = bool(re.search(r"\bproducts?\b", low))
+    has_service = bool(re.search(r"\bservices?\b", low))
+
+    if not (has_product and has_service):
+        return False
+
+    # If both catalogue nouns are present, a normal list/show/know/have/offer
+    # wording is enough to route deterministically without Hugging Face.
+    return bool(
+        re.search(
+            r"\b(list|show|tell|describe|explain|know|offer|provide|have|available)\b",
+            low,
+        )
+    )
 
 
 def _is_public_product_or_service_question(message: str) -> bool:
@@ -1111,6 +1183,51 @@ def _service_list_answer(services: list[dict]) -> str:
     lines.append(
         "Tell me which service you are interested in and I can explain it in more detail."
     )
+
+    return "\n".join(lines)
+
+
+
+def _product_and_service_list_answer(
+    products: list[dict],
+    services: list[dict],
+) -> str:
+    """Return both catalogues in one deterministic response."""
+    lines = ["Here are the products and services currently available:", ""]
+
+    lines.append("PRODUCTS")
+    if products:
+        for idx, product in enumerate(products, 1):
+            name = product.get("name") or "Unnamed product"
+            description = product.get("description") or ""
+            lines.append(
+                f"{idx}. {name} - "
+                f"{_format_price(product.get('price'), product.get('currency'))}"
+            )
+            if description:
+                lines.append(f"   {description}")
+    else:
+        lines.append("No products are currently available.")
+
+    lines.append("")
+    lines.append("SERVICES")
+    if services:
+        for idx, service in enumerate(services, 1):
+            name = service.get("name") or "Unnamed service"
+            description = service.get("description") or ""
+            lines.append(
+                f"{idx}. {name} - "
+                f"{_format_price(service.get('price'), service.get('currency'))}"
+            )
+            if description:
+                lines.append(f"   {description}")
+    else:
+        lines.append("No services are currently available.")
+
+    lines.extend([
+        "",
+        "Tell me which product or service you are interested in and I can explain it in more detail.",
+    ])
 
     return "\n".join(lines)
 
@@ -3206,6 +3323,28 @@ async def answer_chat(
     # Choice 2 intentionally leaves answer=None so the RAG/AI advisory path
     # below can generate knowledge-based marketing suggestions.
 
+    # 1. Combined product + service catalogue request.
+    # This must run before the individual service/product list routes.
+    elif (
+        answer is None
+        and not business_idea_discovery
+        and _wants_product_and_service_list(message)
+    ):
+        answer = _product_and_service_list_answer(
+            ctx.get("products") or [],
+            ctx.get("services") or [],
+        )
+        recommended = ctx.get("products") or []
+        used_knowledge = False
+        print(
+            "DETERMINISTIC_ROUTE: product_and_service_list",
+            {
+                "product_count": len(ctx.get("products") or []),
+                "service_count": len(ctx.get("services") or []),
+            },
+            flush=True,
+        )
+
     # 1. Service-list/service-description questions.
     # This must be checked before product recommendation logic.
     elif (
@@ -3215,6 +3354,7 @@ async def answer_chat(
     ):
         answer = _service_list_answer(ctx["services"])
         recommended = []
+        used_knowledge = False
         print(
             "DETERMINISTIC_ROUTE: service_list",
             {"service_count": len(ctx.get("services") or [])},
@@ -3230,6 +3370,7 @@ async def answer_chat(
         answer = _product_list_answer(ctx["products"])
         # Return every available product so the frontend can render the full list.
         recommended = ctx["products"]
+        used_knowledge = False
         print(
             "DETERMINISTIC_ROUTE: product_list",
             {"product_count": len(ctx.get("products") or [])},
