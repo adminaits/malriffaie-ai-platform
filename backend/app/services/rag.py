@@ -543,111 +543,94 @@ def _is_greeting(message: str) -> bool:
 
 
 def _wants_product_list(message: str) -> bool:
-    low = (message or "").lower().strip()
+    """Detect generic requests to see the available product catalogue."""
+    low = " ".join(str(message or "").lower().split())
+    normalized = re.sub(r"[?.,!;:()\\[\\]{}]", " ", low)
+    normalized = re.sub(r"\\s+", " ", normalized).strip()
 
     exact_requests = {
-        "product",
-        "products",
-        "product please",
-        "products please",
-        "product list",
-        "products list",
-        "list product",
-        "list products",
-        "list all products",
-        "list of products",
-        "all products",
-        "show product",
-        "show products",
-        "show me products",
-        "show me the products",
-        "show all products",
-        "show me all products",
-        "available products",
-        "what product",
-        "what products",
-        "what products do you have",
-        "what products do you offer",
-        "which products",
-        "tell me about products",
-        "tell me about your products",
-        "tell me the products",
-        "describe products",
-        "describe your products",
-        "explain products",
-        "your products",
-        "products available",
-        "products you provide",
-        "products you offer",
-        "what do you sell",
-        "catalog",
-        "catalogue",
-        "product catalog",
-        "product catalogue",
+        "product", "products", "product please", "products please",
+        "product list", "products list", "list product", "list products",
+        "list all products", "list of products", "all products",
+        "show product", "show products", "show me products",
+        "show me the products", "show all products", "show me all products",
+        "available products", "what product", "what products",
+        "what products do you have", "what products do you offer",
+        "what are your products", "which products",
+        "tell me about products", "tell me about your products",
+        "tell me the products", "describe products", "describe your products",
+        "explain products", "your products", "products available",
+        "products you provide", "products you offer", "what do you sell",
+        "catalog", "catalogue", "product catalog", "product catalogue",
+        "can i know about the products you have",
+        "can i know the products you have",
+        "can you tell me about your products",
+        "can you show me your products",
     }
 
-    if low in exact_requests:
+    if normalized in exact_requests:
         return True
 
-    return any(
-        phrase in low
-        for phrase in [
-            "list all products",
-            "list of products",
-            "show me products",
-            "show all products",
-            "show me all products",
-            "products list",
-            "product list",
-            "available products",
-            "what products do you have",
-            "what products do you offer",
-            "tell me about products",
-            "describe products",
-            "describe your products",
-            "product catalog",
-            "product catalogue",
-        ]
-    )
+    patterns = [
+        r"\\b(?:what|which|show|list|tell|describe|explain|know)\\b.*\\bproducts\\b",
+        r"\\bproducts\\b.*\\b(?:have|offer|provide|available|sell)\\b",
+        r"\\b(?:your|available)\\s+products\\b",
+    ]
+    return any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in patterns)
 
 
 def _wants_service_list(message: str) -> bool:
-    low = (message or "").lower().strip()
+    """Detect generic requests to see Malriffaie's available services."""
+    low = " ".join(str(message or "").lower().split())
+    normalized = re.sub(r"[?.,!;:()\\[\\]{}]", " ", low)
+    normalized = re.sub(r"\\s+", " ", normalized).strip()
 
-    return any(
-        phrase in low
-        for phrase in [
-            "list services",
-            "list all services",
-            "list of services",
-            "service list",
-            "services list",
-            "show services",
-            "show me services",
-            "show all services",
-            "show me all services",
-            "available services",
-            "what services",
-            "what service",
-            "what services do you have",
-            "what services do you offer",
-            "which services",
-            "describe services",
-            "describe the services",
-            "describe your services",
-            "can you describe services",
-            "can you describe the services",
-            "tell me about services",
-            "tell me about your services",
-            "tell me the services",
-            "explain services",
-            "explain your services",
-            "services available",
-            "services you provide",
-            "services you offer",
-            "your services",
+    exact_requests = {
+        "service", "services", "service please", "services please",
+        "list services", "list all services", "list of services",
+        "service list", "services list", "show services", "show me services",
+        "show all services", "show me all services", "available services",
+        "what services", "what service", "what services do you have",
+        "what services do you offer", "what are your services",
+        "which services", "which services are available",
+        "describe services", "describe the services", "describe your services",
+        "can you describe services", "can you describe the services",
+        "tell me about services", "tell me about your services",
+        "tell me the services", "explain services", "explain your services",
+        "services available", "services you provide", "services you offer",
+        "your services", "can i know about the services you have",
+        "can i know the services you have",
+        "can you tell me about the services you have",
+        "can you tell me about your services",
+        "can you show me your services",
+        "what kind of services do you offer",
+        "what type of services do you offer",
+    }
+
+    if normalized in exact_requests:
+        return True
+
+    specific_terms = [
+        "online consultation", "consultation service", "feasibility study",
+        "marketing strategy package", "hr manual", "human resources manual",
+        "retainer membership", "partnership agreement",
+        "service level agreement",
+    ]
+
+    if any(term in normalized for term in specific_terms):
+        generic_markers = [
+            "all services", "services do you have", "services do you offer",
+            "your services", "list services", "show services",
         ]
-    )
+        if not any(marker in normalized for marker in generic_markers):
+            return False
+
+    patterns = [
+        r"\\b(?:what|which|show|list|tell|describe|explain|know)\\b.*\\bservices\\b",
+        r"\\bservices\\b.*\\b(?:have|offer|provide|available)\\b",
+        r"\\b(?:your|available)\\s+services\\b",
+    ]
+    return any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in patterns)
 
 
 def _is_public_product_or_service_question(message: str) -> bool:
@@ -3232,6 +3215,11 @@ async def answer_chat(
     ):
         answer = _service_list_answer(ctx["services"])
         recommended = []
+        print(
+            "DETERMINISTIC_ROUTE: service_list",
+            {"service_count": len(ctx.get("services") or [])},
+            flush=True,
+        )
 
     # 2. Product-list questions.
     elif (
@@ -3242,6 +3230,11 @@ async def answer_chat(
         answer = _product_list_answer(ctx["products"])
         # Return every available product so the frontend can render the full list.
         recommended = ctx["products"]
+        print(
+            "DETERMINISTIC_ROUTE: product_list",
+            {"product_count": len(ctx.get("products") or [])},
+            flush=True,
+        )
 
     # 3. Booking/consultation questions.
     elif (
@@ -3595,12 +3588,15 @@ async def answer_chat(
         hf = _build_huggingface_client(cfg)
 
         try:
-            configured_timeout = _safe_int(cfg.get("timeout"), 30)
-            generation_timeout = (
-                max(configured_timeout, 60)
-                if assessment
-                else configured_timeout
-            )
+            # Real RAG prompts are much larger than the Admin connection test.
+            configured_timeout = _safe_int(cfg.get("timeout"), 60)
+
+            if assessment or business_idea_discovery:
+                generation_timeout = max(configured_timeout, 90)
+            elif contextual_followup or business_detail_mode or marketing_advice_mode:
+                generation_timeout = max(configured_timeout, 75)
+            else:
+                generation_timeout = max(configured_timeout, 60)
 
             answer = await hf.generate(
                 prompt,
